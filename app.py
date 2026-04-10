@@ -383,11 +383,19 @@ if pdf_files and df_ledger is not None:
             workers = min(MAX_WORKERS, total_jobs)
             with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
                 futures = {executor.submit(_execute_job, job): i for i, job in enumerate(jobs)}
-                for future in concurrent.futures.as_completed(futures):
-                    result = future.result()
-                    all_ai_data.extend(result)
-                    tracker.record(result)
-                    _refresh_ui()
+
+                # as_completed() はFutureが返るまでブロックするためUIが止まる。
+                # wait(timeout) でポーリングし、完了待ち中も 0.5秒ごとに経過時間を更新する。
+                pending = set(futures.keys())
+                while pending:
+                    done, pending = concurrent.futures.wait(
+                        pending, timeout=0.5  # 最大 0.5秒ごとにUIを再描画
+                    )
+                    for future in done:
+                        result = future.result()
+                        all_ai_data.extend(result)
+                        tracker.record(result)
+                    _refresh_ui()  # 完了件数に関わらず毎ループ更新 → 時計が動く
 
             # ──────────────────────────────────────────────
             # Step 4: データ集計と突合
