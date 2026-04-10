@@ -13,7 +13,7 @@ def check_password():
         st.title("認証が必要です")
         password = st.text_input("合言葉を入力してください", type="password")
         if st.button("ログイン"):
-            if password == "your_secret_password": # 👈 ここに好きなパスワードを設定
+            if password == "351835": # 👈 ここに好きなパスワードを設定
                 st.session_state["password_correct"] = True
                 st.rerun() # 画面を再読み込みしてツールを表示
             else:
