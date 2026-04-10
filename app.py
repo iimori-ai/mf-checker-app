@@ -3,7 +3,6 @@ import pandas as pd
 import google.generativeai as genai
 import fitz  # PyMuPDF
 import json
-import math
 
 # --- 🔐 認証ゲート ---
 if "auth" not in st.session_state:
@@ -21,13 +20,13 @@ if not st.session_state.auth:
     st.stop()
 
 # --- 🚀 メインツール ---
-st.title("MF会計 × クレカ明細 突合ツール ⚡タイムアウト対策版")
+st.title("MF会計 × クレカ明細 突合ツール ⚡超安定版")
 
 st.subheader("🔑 1. 初期設定")
 api_key = st.text_input("Gemini APIキーを入力してください", type="password")
 
 if not api_key:
-    st.warning("まずは上にAPIキーを入力してください。")
+    st.warning("上にAPIキーを入力すると、アップロード画面が表示されます。")
     st.stop()
 
 st.subheader("📁 2. ファイルをアップロード")
@@ -37,14 +36,16 @@ with col1:
 with col2:
     pdf_file = st.file_uploader("クレカ明細 (PDF)", type=["pdf"])
 
+# CSV読み込み
 df_mf = None
 if csv_file:
     try:
         df_mf = pd.read_csv(csv_file, encoding="shift_jis")
         st.success("✅ CSV読み込み完了")
     except:
-        st.error("CSVの読み込みに失敗しました（Shift-JISを確認してください）")
+        st.error("CSVの読み込みに失敗しました（Shift-JISか確認してください）")
 
+# PDF解析と突合
 if pdf_file and df_mf is not None:
     if st.button("🚀 3. 解析スタート！"):
         progress_bar = st.progress(0)
@@ -56,9 +57,10 @@ if pdf_file and df_mf is not None:
             doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
             full_text = "".join([page.get_text() for page in doc])
             
-            # 2. テキストを小分けにする (約3000文字ずつ)
-            chunk_size = 3000
+            # 2. テキストを1000文字ずつに分割
+            chunk_size = 1000 # 👈 ご要望通り1000文字に！
             chunks = [full_text[i:i+chunk_size] for i in range(0, len(full_text), chunk_size)]
+            chunks = [c for c in chunks if c.strip()] # 空っぽの束は除外
             total_chunks = len(chunks)
             
             all_ai_data = []
@@ -68,8 +70,8 @@ if pdf_file and df_mf is not None:
             # 3. 小分けにしてAIに依頼
             for i, chunk in enumerate(chunks):
                 current_step = i + 1
-                percent = int((current_step / total_chunks) * 80) + 10
-                status_text.info(f"🤖 AI解析中... ({current_step}/{total_chunks} ブロック目)")
+                percent = int((current_step / total_chunks) * 90)
+                status_text.info(f"🤖 AI解析中... ({current_step}/{total_chunks} ブロック処理中)")
                 progress_bar.progress(percent)
                 
                 prompt = f"""
@@ -81,34 +83,43 @@ if pdf_file and df_mf is not None:
                 
                 response = model.generate_content(prompt)
                 
-                # JSON抽出
-                raw_json = response.text.strip()
-                if "```json" in raw_json:
-                    raw_json = raw_json.split("```json")[1].split("```")[0]
-                elif "```" in raw_json:
-                    raw_json = raw_json.split("```")[1].split("```")[0]
+                # JSON部分を抜き出す
+                res_text = response.text.strip()
+                if "```json" in res_text:
+                    res_text = res_text.split("```json")[1].split("```")[0]
+                elif "```" in res_text:
+                    res_text = res_text.split("```")[1].split("```")[0]
                 
-                all_ai_data.extend(json.loads(raw_json.strip()))
+                try:
+                    data = json.loads(res_text.strip())
+                    if isinstance(data, list):
+                        all_ai_data.extend(data)
+                except:
+                    continue # そのブロックが失敗しても次に進む
 
-            # 4. 突合
-            status_text.info("🔍 マッチング中...")
-            df_ai = pd.DataFrame(all_ai_data)
-            
-            mf_all_values = set(df_mf.astype(str).values.flatten())
-            status_list = []
-            for _, row in df_ai.iterrows():
-                val = str(row['amount']).replace(',', '')
-                status_list.append("✅ 登録済" if val in mf_all_values else "❌ 連携漏れ")
-            
-            df_ai['MF登録状況'] = status_list
-            status_text.success("✨ 完了しました！")
-            progress_bar.progress(100)
-            
-            st.write("### 🔍 突合結果")
-            st.dataframe(df_ai.style.map(
-                lambda x: 'background-color: #ffcccc;' if x == '❌ 連携漏れ' else '', 
-                subset=['MF登録状況']
-            ))
+            # 4. 突合（マッチング）
+            if not all_ai_data:
+                st.warning("AIがデータを抽出できませんでした。PDFの内容を確認してください。")
+            else:
+                status_text.info("🔍 マネフォのデータと照合中...")
+                df_ai = pd.DataFrame(all_ai_data)
+                
+                # 金額を突合用に整形
+                mf_all_values = set(df_mf.astype(str).values.flatten())
+                status_list = []
+                for _, row in df_ai.iterrows():
+                    val = str(row.get('amount', '')).replace(',', '').replace('.0', '')
+                    status_list.append("✅ 登録済" if val in mf_all_values else "❌ 連携漏れ")
+                
+                df_ai['MF登録状況'] = status_list
+                status_text.success("✨ 全ての処理が完了しました！")
+                progress_bar.progress(100)
+                
+                st.write("### 🔍 突合結果")
+                st.dataframe(df_ai.style.map(
+                    lambda x: 'background-color: #ffcccc;' if x == '❌ 連携漏れ' else '', 
+                    subset=['MF登録状況']
+                ))
             
         except Exception as e:
             st.error(f"エラーが発生しました: {e}")
