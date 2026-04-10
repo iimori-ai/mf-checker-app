@@ -96,7 +96,7 @@ if pdf_files and df_ledger is not None:
                 st.stop()
 
             genai.configure(api_key=api_key)
-            model = genai.GenerativeModel("gemini-1.5-flash")
+            model = genai.GenerativeModel("gemini-2.5-flash")
             
             all_ai_data = []
             progress_bar = st.progress(0)
