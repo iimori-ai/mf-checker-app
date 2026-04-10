@@ -13,6 +13,7 @@ if not st.session_state.auth:
     st.title("🔐 認証が必要です")
     password = st.text_input("合言葉を入力してください", type="password")
     if st.button("ログイン"):
+        # 💡 your_secret_password を自分の好きな言葉に変えて保存してください
         if password == "351835": 
             st.session_state.auth = True
             st.rerun()
@@ -38,8 +39,8 @@ with col_start:
 with col_end:
     end_date = st.date_input("終了日", value=date(target_year, 12, 31), format="YYYY/MM/DD")
 with col_bal:
-    # 指定期間の開始日時点での、カード会社への未払金残高などを入力
-    start_balance = st.number_input("開始日の期首残高", value=0, help="開始日の前日時点での未払金残高などを入力してください。")
+    # 選択期間の最初の日の残高（前日までの未払金残高など）
+    start_balance = st.number_input("開始日の期首残高", value=0)
 
 if not api_key:
     st.warning("APIキーを入力してください。")
@@ -50,9 +51,9 @@ col1, col2 = st.columns(2)
 with col1:
     csv_file = st.file_uploader("会計ソフトCSV (MF・freee等)", type=["csv"])
 with col2:
-    pdf_files = st.file_uploader("クレカ明細 (PDF)", type=["pdf"], accept_multiple_files=True)
+    pdf_files = st.file_uploader("クレカ明細 (PDF) ※複数可", type=["pdf"], accept_multiple_files=True)
 
-# CSV読み込み
+# --- CSV読み込み (MF/freee 汎用) ---
 df_ledger = None
 if csv_file:
     encodings = ["shift_jis", "utf-8-sig", "cp932"]
@@ -60,24 +61,27 @@ if csv_file:
         try:
             csv_file.seek(0)
             df_ledger = pd.read_csv(csv_file, encoding=enc)
-            st.success(f"✅ 会計データ読み込み完了")
+            st.success(f"✅ 会計データ読み込み成功 ({enc})")
             break
         except:
             continue
 
-# メイン処理
+# --- メイン処理 ---
 if pdf_files and df_ledger is not None:
     if st.button("🚀 解析 ＆ 残高検証スタート！"):
         progress_bar = st.progress(0)
         status_text = st.empty()
         
         try:
+            # 1. PDFからテキスト抽出
+            status_text.info("📄 PDFを読み込んでいます...")
             full_text = ""
             for pdf_file in pdf_files:
                 doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
                 for page in doc:
                     full_text += page.get_text()
             
+            # 2. 1000文字ずつに分割 (タイムアウト対策)
             chunk_size = 1000
             chunks = [full_text[i:i+chunk_size] for i in range(0, len(full_text), chunk_size)]
             chunks = [c for c in chunks if c.strip()]
@@ -87,41 +91,85 @@ if pdf_files and df_ledger is not None:
             genai.configure(api_key=api_key)
             model = genai.GenerativeModel('gemini-2.5-flash')
             
+            # 3. AI解析
             for i, chunk in enumerate(chunks):
-                status_text.info(f"🤖 AI解析中... ({i+1}/{total_chunks})")
-                progress_bar.progress(int(((i+1)/total_chunks)*80))
+                current_step = i + 1
+                percent = int((current_step / total_chunks) * 80)
+                status_text.info(f"🤖 AI解析中... ({current_step}/{total_chunks})")
+                progress_bar.progress(percent)
                 
                 prompt = f"""
-                明細から「決済取引」のみを抽出しJSONで出力してください。
-                年は「{target_year}年」として補完してください。
+                明細から「決済取引（利用日、摘要、金額）」を抽出し、JSONリストのみで出力してください。
+                年は「{target_year}年」としてください。返品・返金は金額をマイナスにしてください。
                 形式: [{{"date": "YYYY/MM/DD", "description": "店名", "amount": 1000}}]
                 ---テキスト---
                 {chunk}
                 """
                 response = model.generate_content(prompt)
                 res_text = response.text.strip()
-                if "
-http://googleusercontent.com/immersive_entry_chip/0
-http://googleusercontent.com/immersive_entry_chip/1
+                
+                # JSON部分を安全に抽出 (エラーの元を修正)
+                if "```json" in res_text:
+                    res_text = res_text.split("```json")[1].split("```")[0]
+                elif "```" in res_text:
+                    res_text = res_text.split("```")[1].split("```")[0]
+                
+                try:
+                    data = json.loads(res_text.strip())
+                    if isinstance(data, list):
+                        all_ai_data.extend(data)
+                except:
+                    continue
 
----
-
-### ✨ 追加機能のポイント
-
-1.  **残高スライド計算機能**:
-    * `開始日の期首残高` を起点として、1件ずつ `amount` を引いて（または返金なら足して）いきます。
-    * 計算結果は **「明細上の計算残高」** 列として表示されます。
-    * これにより、PDF明細の最後にある「今回のお支払い合計」や「未払金残高」と、ツールの最終行の数字が一致するか一目で確認できます。
-
-2.  **freee対応（汎用マッチング）**:
-    * freeeのCSVはMFと列名が違いますが、このツールは**「CSV内のどこかのセルにその金額が存在するか」**を全検索する仕組みにしています。
-    * そのため、freeeから出した「仕訳帳」でも「現預金レポート」でも、そのままアップロードすれば突合が可能です。
-
-3.  **アメックス等のマイナス表記対応**:
-    * アメックス特有の「▲」によるマイナス表記や、小数点（.0）がCSVに含まれていても、内部で正規化してマッチングするように強化しました。
-
-### 💡 運用のコツ
-カード会社のPDFには「今回の請求額」が載っていますが、これは「前月までの残高 ＋ 今月の利用 ＋ 手数料 － 支払い」の結果です。
-ツールに入力する **「期首残高」** は、**「開始日の前日時点での、カード会社に対する未払金残高」** を入力すると、最も正確に検証ができます！
-
-GitHubを更新して、計算結果が実際の明細と合うか確認してみてください。
+            # 4. フィルタリング・残高計算・突合
+            if not all_ai_data:
+                st.warning("有効なデータを抽出できませんでした。")
+            else:
+                df_ai = pd.DataFrame(all_ai_data).drop_duplicates()
+                df_ai['date'] = pd.to_datetime(df_ai['date'], errors='coerce')
+                df_ai = df_ai.dropna(subset=['date'])
+                
+                # 期間で絞り込み ＆ 日付順に並び替え
+                mask = (df_ai['date'].dt.date >= start_date) & (df_ai['date'].dt.date <= end_date)
+                df_ai = df_ai.loc[mask].sort_values('date').reset_index(drop=True)
+                
+                # --- 残高の自動計算 ---
+                current_bal = start_balance
+                calc_balances = []
+                for _, row in df_ai.iterrows():
+                    # 支出をマイナス、返金をプラスとして計算 (未払金残高の減少)
+                    current_bal -= row['amount']
+                    calc_balances.append(current_bal)
+                
+                df_ai['明細上の計算残高'] = calc_balances
+                
+                # --- 突合 (freee/MF 汎用) ---
+                status_text.info("🔍 会計ソフトのデータと照合中...")
+                # 会計データの全セルを検索対象にする
+                ledger_values = set(df_ledger.astype(str).values.flatten())
+                
+                status_list = []
+                for _, row in df_ai.iterrows():
+                    # 金額の表記揺れを吸収
+                    amt_str = str(row.get('amount', '')).replace(',', '').replace('.0', '').replace('▲', '-')
+                    if amt_str in ledger_values:
+                        status_list.append("✅ 登録済")
+                    else:
+                        status_list.append("❌ 連携漏れ")
+                
+                df_ai['登録状況'] = status_list
+                df_ai['date'] = df_ai['date'].dt.strftime('%Y/%m/%d')
+                
+                status_text.success("✨ 解析 ＆ 検証完了！")
+                progress_bar.progress(100)
+                
+                st.write(f"### 🔍 突合結果 & 残高推移 ({len(df_ai)}件)")
+                st.metric("最終的な計算上の残高", f"{current_bal:,} 円")
+                
+                st.dataframe(df_ai.style.map(
+                    lambda x: 'background-color: #ffcccc; color: #900;' if x == '❌ 連携漏れ' else '', 
+                    subset=['登録状況']
+                ))
+            
+        except Exception as e:
+            st.error(f"エラーが発生しました: {e}")
