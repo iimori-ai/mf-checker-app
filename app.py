@@ -13,7 +13,7 @@ if not st.session_state.auth:
     # 💡 your_secret_password を好きな合言葉に変えてもOKです
     password = st.text_input("合言葉を入力してください", type="password")
     if st.button("ログイン"):
-        if password == "your_secret_password": 
+        if password == "351835": 
             st.session_state.auth = True
             st.rerun()
         else:
