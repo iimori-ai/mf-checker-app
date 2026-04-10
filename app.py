@@ -155,43 +155,35 @@ def _parse_response(res_text: str) -> list:
     return data if isinstance(data, list) else []
 
 
-def _call_text_api(args: tuple) -> list:
-    """テキストチャンクをAPIに送信。response_mime_type で直接JSONを要求。"""
+def _call_text_api(args: tuple) -> tuple:
+    """テキストチャンクをAPIに送信。(results, error_msg) のタプルを返す。"""
     model, prompt = args
     try:
-        response = model.generate_content(
-            prompt,
-            generation_config=genai.GenerationConfig(
-                response_mime_type="application/json"
-            ),
-        )
-        return _parse_response(response.text)
-    except json.JSONDecodeError:
-        return []
-    except Exception:
-        return []
+        # response_mime_type は省略（SDKバージョン依存を避ける）
+        # _parse_response 側でマークダウン剥ぎを行う
+        response = model.generate_content(prompt)
+        return _parse_response(response.text), None
+    except json.JSONDecodeError as e:
+        return [], f"JSONパースエラー: {e}"
+    except Exception as e:
+        return [], f"テキストAPIエラー: {e}"
 
 
-def _call_image_api(args: tuple) -> list:
-    """スキャンページ画像を Gemini Vision API に送信しOCR+データ抽出を同時実行。"""
+def _call_image_api(args: tuple) -> tuple:
+    """スキャンページ画像を Gemini Vision API に送信しOCR+データ抽出を同時実行。(results, error_msg) を返す。"""
     model, prompt_text, img_bytes = args
     try:
-        # PyMuPDF が生成した PNG バイト列を inline_data として送信
-        # Pillow 不要（genai SDK が dict 形式のインライン画像を直接サポート）
         response = model.generate_content(
             [
                 prompt_text,
                 {"mime_type": "image/png", "data": img_bytes},
-            ],
-            generation_config=genai.GenerationConfig(
-                response_mime_type="application/json"
-            ),
+            ]
         )
-        return _parse_response(response.text)
-    except json.JSONDecodeError:
-        return []
-    except Exception:
-        return []
+        return _parse_response(response.text), None
+    except json.JSONDecodeError as e:
+        return [], f"画像JSONパースエラー: {e}"
+    except Exception as e:
+        return [], f"画像APIエラー: {e}"
 
 
 def _normalize_amount(val) -> str:
@@ -217,13 +209,16 @@ class ProgressTracker:
         self.total      = total
         self.completed  = 0
         self.found      = 0
+        self.errors: list[str] = []   # エラーメッセージ一覧
         self._lock      = threading.Lock()
         self.start_time = time_module.time()
 
-    def record(self, chunk_results: list):
+    def record(self, chunk_results: list, error: str | None = None):
         with self._lock:
             self.completed += 1
             self.found     += len(chunk_results)
+            if error:
+                self.errors.append(error)
 
     @property
     def elapsed(self) -> float:
@@ -364,13 +359,15 @@ if pdf_files and df_ledger is not None:
                 eta     = tracker.eta
                 eta_str = f"残り約 {_fmt_seconds(eta)}" if eta is not None else "計算中..."
                 ph_time.metric("⏱️ 経過時間", _fmt_seconds(tracker.elapsed), delta=eta_str)
+                
+                err_text = f" | ⚠️ エラー {len(tracker.errors)}件" if tracker.errors else ""
                 ph_status.info(
                     f"⚡ 解析中... {tracker.completed}/{tracker.total} 完了 | "
                     f"取引 {tracker.found} 件発見 | "
-                    f"経過 {_fmt_seconds(tracker.elapsed)}"
+                    f"経過 {_fmt_seconds(tracker.elapsed)}{err_text}"
                 )
 
-            def _execute_job(job: tuple) -> list:
+            def _execute_job(job: tuple) -> tuple:
                 """ジョブタイプに応じてテキスト or 画像 API を呼び分ける。"""
                 if job[0] == "text":
                     _, mdl, prompt = job
@@ -392,9 +389,9 @@ if pdf_files and df_ledger is not None:
                         pending, timeout=0.5  # 最大 0.5秒ごとにUIを再描画
                     )
                     for future in done:
-                        result = future.result()
-                        all_ai_data.extend(result)
-                        tracker.record(result)
+                        result_list, error_msg = future.result()
+                        all_ai_data.extend(result_list)
+                        tracker.record(result_list, error=error_msg)
                     _refresh_ui()  # 完了件数に関わらず毎ループ更新 → 時計が動く
 
             # ──────────────────────────────────────────────
