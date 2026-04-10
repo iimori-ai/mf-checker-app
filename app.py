@@ -12,6 +12,7 @@ if "auth" not in st.session_state:
 
 if not st.session_state.auth:
     st.title("🔐 認証が必要です")
+    # 💡 パスワードを忘れたらここを確認（または書き換え）してください
     password = st.text_input("合言葉を入力してください", type="password")
     if st.button("ログイン"):
         if password == "351835": 
@@ -41,15 +42,22 @@ target_year = st.selectbox("明細の対象年", [this_year, this_year-1, this_y
 
 st.subheader("🗓️ 2. 期間と残高の設定")
 col_start, col_end, col_bal = st.columns(3)
-with col_start: start_date = st.date_input("開始日", value=date(target_year, 1, 1))
-with col_end: end_date = st.date_input("終了日", value=date(target_year, 12, 31))
-with col_bal: start_balance = st.number_input("開始日の期首残高", value=0)
+with col_start:
+    start_date = st.date_input("開始日", value=date(target_year, 1, 1))
+with col_end:
+    end_date = st.date_input("終了日", value=date(target_year, 12, 31))
+with col_bal:
+    # 選択期間の最初の日の残高（前日までの未払金残高など）
+    start_balance = st.number_input("開始日の期首残高", value=0)
 
 st.subheader("📁 3. ファイルをアップロード")
 col1, col2 = st.columns(2)
-with col1: csv_file = st.file_uploader("会計ソフトCSV", type=["csv"])
-with col2: pdf_files = st.file_uploader("クレカ明細 (PDF)", type=["pdf"], accept_multiple_files=True)
+with col1:
+    csv_file = st.file_uploader("会計ソフトCSV (MF・freee等)", type=["csv"])
+with col2:
+    pdf_files = st.file_uploader("クレカ明細 (PDF) ※複数可", type=["pdf"], accept_multiple_files=True)
 
+# 会計データ読み込み
 df_ledger = None
 if csv_file:
     for enc in ["shift_jis", "utf-8-sig", "cp932"]:
@@ -58,20 +66,28 @@ if csv_file:
             df_ledger = pd.read_csv(csv_file, encoding=enc)
             st.success("✅ 会計データ読み込み成功")
             break
-        except: continue
+        except:
+            continue
 
+# 解析処理
 if pdf_files and df_ledger is not None:
     if st.button("🚀 解析スタート（タイムアウト対策版）"):
+        if not api_key:
+            st.error("左側のサイドバーにAPIキーを入力してください。")
+            st.stop()
+            
         progress_bar = st.progress(0)
         status_text = st.empty()
         
         try:
+            # 1. PDFからテキスト抽出
             full_text = ""
             for pdf_file in pdf_files:
                 doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
-                for page in doc: full_text += page.get_text()
+                for page in doc:
+                    full_text += page.get_text()
             
-            # --- 💡 300文字ずつ分割 ＋ 50文字の重複を持たせる ---
+            # 2. 300文字ずつ分割 ＋ 50文字の重複（タイムアウト＆泣き別れ対策）
             chunk_size = 300
             overlap = 50
             chunks = []
@@ -85,8 +101,8 @@ if pdf_files and df_ledger is not None:
             genai.configure(api_key=api_key)
             model = genai.GenerativeModel('gemini-2.5-flash')
             
+            # 3. AI解析
             for i, chunk in enumerate(chunks):
-                # 画面を更新して「動いてる感」を出す（タイムアウト防止の気休め）
                 status_text.info(f"🤖 AI解析中... ({i+1}/{total_chunks})")
                 progress_bar.progress(int(((i+1)/total_chunks)*85))
                 
@@ -95,22 +111,64 @@ if pdf_files and df_ledger is not None:
                 年は「{target_year}年」補完。返品はマイナス。
                 形式: [{{"date": "YYYY/MM/DD", "description": "摘要", "amount": 1000}}]
                 【お手本】: {user_examples}
-                ---対象---
+                ---対象テキスト---
                 {chunk}
                 """
                 
                 response = model.generate_content(prompt)
                 res_text = response.text.strip()
-                if "
-http://googleusercontent.com/immersive_entry_chip/0
-http://googleusercontent.com/immersive_entry_chip/1
+                
+                # JSON部分を抜き出す
+                if "```json" in res_text:
+                    res_text = res_text.split("```json")[1].split("```")[0]
+                elif "```" in res_text:
+                    res_text = res_text.split("```")[1].split("```")[0]
+                
+                try:
+                    data = json.loads(res_text.strip())
+                    if isinstance(data, list):
+                        all_ai_data.extend(data)
+                except:
+                    continue
+                time.sleep(0.1)
 
-### 🚀 改善のポイント
-* **300文字 ＋ 50文字重複**: 200文字だとぶつ切りになりすぎるため、300文字に設定しました。さらに50文字分、前の束の終わりを次の束の始まりに含めているので、**「データの切れ目での読み落とし」**を防止しています。
-* **サーバーへの配慮**: 各ループの終わりに `time.sleep(0.1)` を入れました。これにより、Streamlitのサーバー側との通信が安定しやすくなります。
-* **表示の簡略化**: 表の列名を短くし、スマホや狭い画面でもパッと見やすくしました。
-
-これで、長い明細でもタイムアウトせずに最後まで辿り着けるはずです！
-もしこれでも止まる場合は、PDFのページ数が多すぎる可能性があります。その時は「1ファイルずつアップロード」して試してみてください。
-
-「サイドバーの学習機能」に何かお手本を入れて試してみましたか？精度に変化はありましたでしょうか？
+            # 4. データ集計
+            if not all_ai_data:
+                st.warning("有効なデータを抽出できませんでした。")
+            else:
+                df_ai = pd.DataFrame(all_ai_data).drop_duplicates()
+                df_ai['date'] = pd.to_datetime(df_ai['date'], errors='coerce')
+                df_ai = df_ai.dropna(subset=['date'])
+                
+                # 期間フィルタ
+                mask = (df_ai['date'].dt.date >= start_date) & (df_ai['date'].dt.date <= end_date)
+                df_ai = df_ai.loc[mask].sort_values('date').reset_index(drop=True)
+                
+                # 残高計算
+                current_bal = start_balance
+                calc_balances = []
+                for _, row in df_ai.iterrows():
+                    current_bal -= row['amount']
+                    calc_balances.append(current_bal)
+                df_ai['計算残高'] = calc_balances
+                
+                # 突合
+                ledger_values = set(df_ledger.astype(str).values.flatten())
+                status_list = []
+                for _, row in df_ai.iterrows():
+                    amt = str(row.get('amount', '')).replace(',','').replace('.0','').replace('▲','-')
+                    status_list.append("✅ 済" if amt in ledger_values else "❌ 漏れ")
+                
+                df_ai['状況'] = status_list
+                df_ai['date'] = df_ai['date'].dt.strftime('%m/%d')
+                
+                status_text.success("✨ 解析完了！")
+                progress_bar.progress(100)
+                st.metric("最終計算残高", f"{current_bal:,} 円")
+                st.dataframe(df_ai.style.map(
+                    lambda x: 'background-color: #ffcccc;' if x == '❌ 漏れ' else '', 
+                    subset=['状況']
+                ))
+            
+        except Exception as e:
+            st.error(f"エラー: {e}")
