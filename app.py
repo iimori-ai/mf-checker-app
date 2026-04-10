@@ -12,7 +12,7 @@ if "auth" not in st.session_state:
 
 if not st.session_state.auth:
     st.title("🔐 認証が必要です")
-    # 💡 パスワードを忘れたらここを確認（または書き換え）してください
+    # your_secret_password を自分の好きな言葉に変えて保存してください
     password = st.text_input("合言葉を入力してください", type="password")
     if st.button("ログイン"):
         if password == "351835": 
@@ -23,7 +23,7 @@ if not st.session_state.auth:
     st.stop()
 
 # --- 🚀 メインツール ---
-st.title("会計ソフト × クレカ明細 突合・学習型ツール ⚡")
+st.title("会計ソフト × クレカ明細 突合・学習型ツール ⚡ ターボ版")
 
 with st.sidebar:
     st.header("⚙️ 設定")
@@ -32,8 +32,8 @@ with st.sidebar:
     st.header("🎓 AIへの学習（お手本）")
     user_examples = st.text_area(
         "学習用サンプル",
-        placeholder="例: '一括払いからの変更'という行は無視して。",
-        height=150
+        placeholder="例: '一括払いからの変更'という行は無視して。特定の店名はこう読み替えて。",
+        height=200
     )
 
 st.subheader("🔑 1. 初期設定")
@@ -47,7 +47,6 @@ with col_start:
 with col_end:
     end_date = st.date_input("終了日", value=date(target_year, 12, 31))
 with col_bal:
-    # 選択期間の最初の日の残高（前日までの未払金残高など）
     start_balance = st.number_input("開始日の期首残高", value=0)
 
 st.subheader("📁 3. ファイルをアップロード")
@@ -57,21 +56,21 @@ with col1:
 with col2:
     pdf_files = st.file_uploader("クレカ明細 (PDF) ※複数可", type=["pdf"], accept_multiple_files=True)
 
-# 会計データ読み込み
+# 会計データ読み込み (エンコーディング自動判別)
 df_ledger = None
 if csv_file:
     for enc in ["shift_jis", "utf-8-sig", "cp932"]:
         try:
             csv_file.seek(0)
             df_ledger = pd.read_csv(csv_file, encoding=enc)
-            st.success("✅ 会計データ読み込み成功")
+            st.success(f"✅ 会計データ読み込み成功 ({enc})")
             break
         except:
             continue
 
-# 解析処理
+# メイン解析処理
 if pdf_files and df_ledger is not None:
-    if st.button("🚀 解析スタート（タイムアウト対策版）"):
+    if st.button("🚀 爆速解析スタート！"):
         if not api_key:
             st.error("左側のサイドバーにAPIキーを入力してください。")
             st.stop()
@@ -80,16 +79,17 @@ if pdf_files and df_ledger is not None:
         status_text = st.empty()
         
         try:
-            # 1. PDFからテキスト抽出
+            # 1. PDFからテキストを一括抽出
+            status_text.info("📄 PDFからテキストを抽出中...")
             full_text = ""
             for pdf_file in pdf_files:
                 doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
                 for page in doc:
                     full_text += page.get_text()
             
-            # 2. 300文字ずつ分割 ＋ 50文字の重複（タイムアウト＆泣き別れ対策）
-            chunk_size = 300
-            overlap = 50
+            # 2. ターボ設定: 5,000文字ずつに分割 (以前の約17倍の速さ)
+            chunk_size = 5000
+            overlap = 500 # データの泣き別れ防止用に500文字重ねる
             chunks = []
             for i in range(0, len(full_text), chunk_size - overlap):
                 chunks.append(full_text[i : i + chunk_size])
@@ -101,24 +101,29 @@ if pdf_files and df_ledger is not None:
             genai.configure(api_key=api_key)
             model = genai.GenerativeModel('gemini-2.5-flash')
             
-            # 3. AI解析
+            # 3. AIによる高速解析
             for i, chunk in enumerate(chunks):
-                status_text.info(f"🤖 AI解析中... ({i+1}/{total_chunks})")
-                progress_bar.progress(int(((i+1)/total_chunks)*85))
+                status_text.info(f"⚡ 爆速解析中... ({i+1}/{total_chunks})")
+                progress_bar.progress(int(((i+1)/total_chunks)*90))
                 
                 prompt = f"""
-                明細から「決済取引」のみを抽出しJSONリストで出力。
-                年は「{target_year}年」補完。返品はマイナス。
+                あなたは優秀な経理担当です。明細から「決済取引」のみを抽出しJSONリストで出力。
+                年は「{target_year}年」として補完。返品や返金は金額をマイナス表記にすること。
+                出力はJSONリストのみとし、説明文は一切不要。
+
                 形式: [{{"date": "YYYY/MM/DD", "description": "摘要", "amount": 1000}}]
-                【お手本】: {user_examples}
-                ---対象テキスト---
+
+                【ユーザー定義の学習例】
+                {user_examples if user_examples else "特になし"}
+
+                ---解析対象テキスト---
                 {chunk}
                 """
                 
                 response = model.generate_content(prompt)
                 res_text = response.text.strip()
                 
-                # JSON部分を抜き出す
+                # マークダウン等の余計な装飾を削除
                 if "```json" in res_text:
                     res_text = res_text.split("```json")[1].split("```")[0]
                 elif "```" in res_text:
@@ -132,43 +137,50 @@ if pdf_files and df_ledger is not None:
                     continue
                 time.sleep(0.1)
 
-            # 4. データ集計
+            # 4. データ集計と突合
             if not all_ai_data:
-                st.warning("有効なデータを抽出できませんでした。")
+                st.warning("データが抽出されませんでした。")
             else:
+                # 重複読みを排除
                 df_ai = pd.DataFrame(all_ai_data).drop_duplicates()
                 df_ai['date'] = pd.to_datetime(df_ai['date'], errors='coerce')
                 df_ai = df_ai.dropna(subset=['date'])
                 
-                # 期間フィルタ
+                # 期間フィルタ & ソート
                 mask = (df_ai['date'].dt.date >= start_date) & (df_ai['date'].dt.date <= end_date)
                 df_ai = df_ai.loc[mask].sort_values('date').reset_index(drop=True)
                 
-                # 残高計算
-                current_bal = start_balance
-                calc_balances = []
-                for _, row in df_ai.iterrows():
-                    current_bal -= row['amount']
-                    calc_balances.append(current_bal)
-                df_ai['計算残高'] = calc_balances
-                
-                # 突合
-                ledger_values = set(df_ledger.astype(str).values.flatten())
-                status_list = []
-                for _, row in df_ai.iterrows():
-                    amt = str(row.get('amount', '')).replace(',','').replace('.0','').replace('▲','-')
-                    status_list.append("✅ 済" if amt in ledger_values else "❌ 漏れ")
-                
-                df_ai['状況'] = status_list
-                df_ai['date'] = df_ai['date'].dt.strftime('%m/%d')
-                
-                status_text.success("✨ 解析完了！")
-                progress_bar.progress(100)
-                st.metric("最終計算残高", f"{current_bal:,} 円")
-                st.dataframe(df_ai.style.map(
-                    lambda x: 'background-color: #ffcccc;' if x == '❌ 漏れ' else '', 
-                    subset=['状況']
-                ))
+                if df_ai.empty:
+                    st.warning("指定された期間内にデータが見つかりませんでした。")
+                else:
+                    # 残高計算 (スライド式)
+                    current_bal = start_balance
+                    calc_balances = []
+                    for _, row in df_ai.iterrows():
+                        current_bal -= row['amount']
+                        calc_balances.append(current_bal)
+                    df_ai['計算残高'] = calc_balances
+                    
+                    # 突合ロジック (全セル検索)
+                    status_text.info("🔍 会計データと最終照合中...")
+                    ledger_values = set(df_ledger.astype(str).values.flatten())
+                    
+                    status_list = []
+                    for _, row in df_ai.iterrows():
+                        amt_str = str(row.get('amount', '')).replace(',','').replace('.0','').replace('▲','-')
+                        status_list.append("✅ 済" if amt_str in ledger_values else "❌ 漏れ")
+                    
+                    df_ai['状況'] = status_list
+                    df_ai['date'] = df_ai['date'].dt.strftime('%m/%d')
+                    
+                    status_text.success("✨ 解析完了！")
+                    progress_bar.progress(100)
+                    
+                    st.metric("最終的な計算残高", f"{current_bal:,} 円")
+                    st.dataframe(df_ai.style.map(
+                        lambda x: 'background-color: #ffcccc; color: #900;' if x == '❌ 漏れ' else '', 
+                        subset=['状況']
+                    ))
             
         except Exception as e:
-            st.error(f"エラー: {e}")
+            st.error(f"エラーが発生しました: {e}")
