@@ -20,7 +20,7 @@ if not st.session_state.auth:
     st.stop()
 
 # --- 🚀 メインツール ---
-st.title("MF会計 × クレカ明細 突合ツール ⚡超安定版")
+st.title("MF会計 × クレカ明細 突合ツール ⚡全自動CSV判別版")
 
 st.subheader("🔑 1. 初期設定")
 api_key = st.text_input("Gemini APIキーを入力してください", type="password")
@@ -36,16 +36,28 @@ with col1:
 with col2:
     pdf_file = st.file_uploader("クレカ明細 (PDF)", type=["pdf"])
 
-# CSV読み込み
+# --- 💡 CSV読み込み（ここを大幅強化しました） ---
 df_mf = None
 if csv_file:
-    try:
-        df_mf = pd.read_csv(csv_file, encoding="shift_jis")
-        st.success("✅ CSV読み込み完了")
-    except:
-        st.error("CSVの読み込みに失敗しました（Shift-JISか確認してください）")
+    # 3つの主要な形式を順番に試します
+    encodings = ["shift_jis", "utf-8-sig", "cp932"]
+    success = False
+    
+    for enc in encodings:
+        try:
+            # ファイルの最初に戻してから読み込む
+            csv_file.seek(0)
+            df_mf = pd.read_csv(csv_file, encoding=enc)
+            st.success(f"✅ CSV読み込み完了 (形式: {enc})")
+            success = True
+            break
+        except:
+            continue
+            
+    if not success:
+        st.error("CSVが読み込めませんでした。ファイルが壊れていないか、別のCSVで試してください。")
 
-# PDF解析と突合
+# --- PDF解析と突合 ---
 if pdf_file and df_mf is not None:
     if st.button("🚀 3. 解析スタート！"):
         progress_bar = st.progress(0)
@@ -58,9 +70,9 @@ if pdf_file and df_mf is not None:
             full_text = "".join([page.get_text() for page in doc])
             
             # 2. テキストを1000文字ずつに分割
-            chunk_size = 1000 # 👈 ご要望通り1000文字に！
+            chunk_size = 1000
             chunks = [full_text[i:i+chunk_size] for i in range(0, len(full_text), chunk_size)]
-            chunks = [c for c in chunks if c.strip()] # 空っぽの束は除外
+            chunks = [c for c in chunks if c.strip()]
             total_chunks = len(chunks)
             
             all_ai_data = []
@@ -83,7 +95,6 @@ if pdf_file and df_mf is not None:
                 
                 response = model.generate_content(prompt)
                 
-                # JSON部分を抜き出す
                 res_text = response.text.strip()
                 if "```json" in res_text:
                     res_text = res_text.split("```json")[1].split("```")[0]
@@ -95,16 +106,15 @@ if pdf_file and df_mf is not None:
                     if isinstance(data, list):
                         all_ai_data.extend(data)
                 except:
-                    continue # そのブロックが失敗しても次に進む
+                    continue
 
-            # 4. 突合（マッチング）
+            # 4. 突合
             if not all_ai_data:
-                st.warning("AIがデータを抽出できませんでした。PDFの内容を確認してください。")
+                st.warning("AIがデータを抽出できませんでした。")
             else:
                 status_text.info("🔍 マネフォのデータと照合中...")
                 df_ai = pd.DataFrame(all_ai_data)
                 
-                # 金額を突合用に整形
                 mf_all_values = set(df_mf.astype(str).values.flatten())
                 status_list = []
                 for _, row in df_ai.iterrows():
@@ -112,7 +122,7 @@ if pdf_file and df_mf is not None:
                     status_list.append("✅ 登録済" if val in mf_all_values else "❌ 連携漏れ")
                 
                 df_ai['MF登録状況'] = status_list
-                status_text.success("✨ 全ての処理が完了しました！")
+                status_text.success("✨ 完了しました！")
                 progress_bar.progress(100)
                 
                 st.write("### 🔍 突合結果")
