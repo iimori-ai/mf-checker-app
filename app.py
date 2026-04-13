@@ -24,7 +24,7 @@ if not st.session_state.auth:
 
 # --- 🚀 2. メインUI ---
 st.title("会計ソフト主導 ⚡ 爆速ファイル突合ツール (取引No照合版)")
-st.info("借方に入力されたキャンセルや調整分も、マイナス金額として正確に照合・計算します。")
+st.info("【新機能】表の「明細突合」列をクリックすると、ステータスを手動で変更できるようになりました。")
 
 # --- 🛠️ 関数群 ---
 def load_file(file):
@@ -149,7 +149,7 @@ if df_ledger_raw is not None and df_card_raw is not None:
             
             unified_rows = []
             
-            # --- 💡 会計帳簿のループ（借方の照合を修正） ---
+            # --- 会計帳簿のループ ---
             for i, row in df_res.iterrows():
                 credit_val = clean_amt(row[l_credit])
                 debit_val = clean_amt(row[l_debit])
@@ -160,27 +160,24 @@ if df_ledger_raw is not None and df_card_raw is not None:
                 actual_card_amt = 0
                 status = "-"
                 
-                # 会計上の実質利用額（借方にある場合はマイナスの利用額とする）
+                # 会計上の実質利用額
                 ledger_net = credit_val - debit_val
                 
-                # 取引Noがカード明細に存在するか？（貸方・借方問わず）
+                # 取引Noがカード明細に存在するか？
                 if tid and tid in card_dict:
                     card_dict[tid]["matched"] = True
                     actual_card_amt = card_dict[tid]["amt"]
                     
-                    # 帳簿の金額（プラスマイナス込み）と実際のカード金額を比較
                     if ledger_net == actual_card_amt:
                         status = "✅ 済"
                     else:
                         status = "⚠️ 差異あり"
                 else:
-                    # カード明細に取引Noがない場合
-                    if tid:
+                    # カード明細にない場合
+                    if credit_val > 0:
                         status = "❓ 元データなし"
                     elif debit_val > 0:
-                        status = "🏦 支払" # 取引Noのない借方は通常の「引き落とし」とみなす
-                    elif credit_val > 0:
-                        status = "❓ 元データなし"
+                        status = "🏦 支払"
                     else:
                         status = "-"
                     
@@ -191,20 +188,19 @@ if df_ledger_raw is not None and df_card_raw is not None:
                     "取引No": tid,
                     l_date: row[l_date],
                     l_desc: row[l_desc],
-                    l_debit: debit_val, # 会計帳簿の表示をそのまま維持
-                    l_credit: credit_val, # 会計帳簿の表示をそのまま維持
+                    l_debit: debit_val, 
+                    l_credit: credit_val,
                     "明細突合": status,
                     "帳簿残高": orig_bal_val,
                     "_actual_amt": actual_card_amt,
                     "_ledger_debit": debit_val
                 })
 
-            # --- 💡 漏れデータ（カードにあるが会計にない） ---
+            # --- 漏れデータ（カードにあるが会計にない） ---
             for tid, data in card_dict.items():
                 if not data["matched"]:
                     card_amt = data["amt"]
                     
-                    # 漏れデータも帳簿風に（プラスなら貸方、マイナスなら借方へ）
                     leak_debit = abs(card_amt) if card_amt < 0 else 0
                     leak_credit = card_amt if card_amt > 0 else 0
                     
@@ -233,10 +229,8 @@ if df_ledger_raw is not None and df_card_raw is not None:
             current_bal = start_balance
             for r in unified_rows:
                 if r["明細突合"] in ["✅ 済", "⚠️ 差異あり", "❌ 漏れ"]:
-                    # カードの実績値を加算（マイナスの場合は自動で減算される）
                     current_bal += r["_actual_amt"]
                 elif r["明細突合"] == "🏦 支払":
-                    # 通常の銀行引き落としは借方の額を引く
                     current_bal -= r["_ledger_debit"]
                 
                 r["計算残高"] = current_bal
@@ -312,7 +306,13 @@ if df_ledger_raw is not None and df_card_raw is not None:
         df_filtered["帳簿残高"] = df_filtered["帳簿残高"].apply(format_bal)
         df_filtered["計算残高"] = df_filtered["計算残高"].apply(format_bal)
 
-        st.dataframe(
+        st.write("💡 **表内の「明細突合」列をクリックすると、ステータスを直接変更（上書き）できます。**")
+
+        # 💡 編集させたくない列のリストを指定
+        disabled_columns = ["取引No", l_date, l_desc, l_debit, l_credit, "帳簿残高", "計算残高", "残高照合"]
+
+        # 💡 st.dataframe を st.data_editor に変更
+        edited_df = st.data_editor(
             df_filtered.style.map(
                 lambda x: "background-color: #ffcccc; color: #900;" if x in ["❌ 漏れ", "❌ 不一致"] else "",
                 subset=["明細突合", "残高照合"]
@@ -326,12 +326,22 @@ if df_ledger_raw is not None and df_card_raw is not None:
                 lambda x: "background-color: #e3f2fd;" if x == "🏦 支払" else "",
                 subset=["明細突合"]
             ),
+            column_config={
+                "明細突合": st.column_config.SelectboxColumn(
+                    "明細突合",
+                    help="ステータスを変更できます",
+                    options=["✅ 済", "❌ 漏れ", "⚠️ 差異あり", "❓ 元データなし", "🏦 支払", "-"],
+                    required=True,
+                )
+            },
+            disabled=disabled_columns,  # 明細突合以外はロックする
             use_container_width=True,
             hide_index=True
         )
         
-        csv_bytes = df_filtered.to_csv(index=False).encode("utf-8-sig")
-        st.download_button("📥 表示中の結果をダウンロード", io.BytesIO(csv_bytes), "突合結果_絞り込み.csv")
+        # 💡 ダウンロード用データは「編集後」のものを使う
+        csv_bytes = edited_df.to_csv(index=False).encode("utf-8-sig")
+        st.download_button("📥 編集した結果をダウンロード", io.BytesIO(csv_bytes), "突合結果_絞り込み.csv")
 
 elif file_ledger or file_card:
     st.warning("両方のファイルをアップロードしてください。")
