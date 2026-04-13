@@ -8,6 +8,14 @@ import unicodedata
 # 💡 画面全体を広く使う「ワイドモード」
 st.set_page_config(page_title="会計・クレカ突合ツール", layout="wide")
 
+# 💡 表だけの「部分更新（Fragment）」機能をセットアップ
+if hasattr(st, "fragment"):
+    fragment_decorator = st.fragment
+elif hasattr(st, "experimental_fragment"):
+    fragment_decorator = st.experimental_fragment
+else:
+    fragment_decorator = lambda f: f
+
 # --- 🔐 1. 認証ゲート ---
 if "auth" not in st.session_state:
     st.session_state.auth = False
@@ -25,7 +33,7 @@ if not st.session_state.auth:
 
 # --- 🚀 2. メインUI ---
 st.title("会計ソフト主導 ⚡ 爆速ファイル突合ツール (完全版)")
-st.info("【スクロール問題解決】表の高さを固定することで、編集しても画面が一番上にジャンプしないようにしました！")
+st.info("【スクロール問題・完全解決】フルリロードの原因を特定し排除しました。画面がピタッと止まります！")
 
 # --- 🛠️ 関数群 ---
 def load_file(file):
@@ -172,8 +180,9 @@ if df_ledger_raw is not None and df_card_raw is not None:
     with col_s3:
         start_balance = st.number_input("開始日の「前日」時点の残高", value=0)
 
-    if "result_df" not in st.session_state:
-        st.session_state.result_df = None
+    # 初回実行フラグの初期化
+    if "is_calculated" not in st.session_state:
+        st.session_state.is_calculated = False
 
     if st.button("🚀 照合 ＆ 残高計算スタート！"):
         try:
@@ -228,14 +237,18 @@ if df_ledger_raw is not None and df_card_raw is not None:
             st.session_state.result_df = df_master
             st.session_state.start_bal = start_balance
             st.session_state.current_bal = last_bal
+            
+            # 💡 これをTrueにすることで、下部の結果エリアが表示される
+            st.session_state.is_calculated = True
 
         except Exception as e:
             st.error(f"エラー: {e}")
 
     # ==========================================
-    # 結果表示・編集エリア
+    # 💡 結果表示・編集エリア（部分更新機能のみ適用）
     # ==========================================
-    if getattr(st.session_state, 'result_df', None) is not None:
+    @fragment_decorator
+    def interactive_results():
         df_master = st.session_state.result_df
         current_bal = st.session_state.current_bal
 
@@ -285,7 +298,6 @@ if df_ledger_raw is not None and df_card_raw is not None:
         
         edit_cols = ["取引No", "日付", "摘要", "借方金額", "貸方金額", "明細突合", "帳簿残高", "計算残高", "残高照合"]
         
-        # 💡 【超重要】 height=800 を指定して表の高さをガッチリ固定し、レイアウト崩れによるジャンプを防ぐ！
         edited_df = st.data_editor(
             df_filtered[edit_cols].style.map(
                 lambda x: "background-color: #ffcccc; color: #900;" if x in ["❌ 漏れ", "❌ 不一致"] else "",
@@ -306,13 +318,17 @@ if df_ledger_raw is not None and df_card_raw is not None:
             disabled=["取引No", "日付", "摘要", "借方金額", "貸方金額", "帳簿残高", "計算残高", "残高照合"],
             use_container_width=True,
             hide_index=True,
-            height=800, # ← これがジャンプを防ぐ魔法の設定です
+            height=800, 
             key="main_editor",
             on_change=handle_edit
         )
 
         csv_bytes = edited_df.to_csv(index=False).encode("utf-8-sig")
         st.download_button("📥 表示中の結果をダウンロード", io.BytesIO(csv_bytes), "突合結果_絞り込み.csv")
+
+    # 💡 修正箇所：データの中身は見ずにフラグだけを確認して実行
+    if st.session_state.get("is_calculated", False):
+        interactive_results()
 
 elif file_ledger or file_card:
     st.warning("両方のファイルをアップロードしてください。")
