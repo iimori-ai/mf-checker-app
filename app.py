@@ -8,7 +8,7 @@ import unicodedata
 # 💡 画面全体を広く使う「ワイドモード」
 st.set_page_config(page_title="クレカ残高突合ツール", layout="wide")
 
-# 💡 部分更新機能のセットアップ
+# 💡 表だけの「部分更新（Fragment）」機能をセットアップ
 if hasattr(st, "fragment"):
     fragment_decorator = st.fragment
 elif hasattr(st, "experimental_fragment"):
@@ -139,6 +139,7 @@ if df_ledger_raw is not None and df_card_raw is not None:
 
     with c_crd:
         st.write("**カード明細側**")
+        st.caption("※「漏れ」データを発見した際に表示するため、日付や摘要も指定してください。")
         c_id = st.selectbox("🔑 取引No列 ", crd_cols, index=find_idx(crd_cols, ["取引No", "ID", "伝票番号", "番号"]))
         c_date = st.selectbox("📅 日付列 ", crd_cols, index=find_idx(crd_cols, ["日付", "年月日", "利用日"]))
         c_desc = st.selectbox("📝 摘要列 ", crd_cols, index=find_idx(crd_cols, ["内容", "摘要", "店名", "利用店"]))
@@ -155,10 +156,11 @@ if df_ledger_raw is not None and df_card_raw is not None:
     with col_s3:
         start_balance = st.number_input("開始日の「前日」時点の残高", value=0)
 
+    # 初回実行フラグ
     if "is_calculated" not in st.session_state:
         st.session_state.is_calculated = False
 
-    if st.button("照合開始"):
+    if st.button("照合開始", type="primary"):
         try:
             df_res = df_ledger_raw.copy()
             df_res["_date_dt"] = pd.to_datetime(df_res[l_date], errors="coerce")
@@ -211,6 +213,7 @@ if df_ledger_raw is not None and df_card_raw is not None:
             st.session_state.result_df = df_master
             st.session_state.start_bal = start_balance
             st.session_state.current_bal = last_bal
+            
             st.session_state.is_calculated = True
 
         except Exception as e:
@@ -245,26 +248,39 @@ if df_ledger_raw is not None and df_card_raw is not None:
         m4.metric("⚠️ 差異あり", len(virtual_df[virtual_df["明細突合"] == "⚠️ 差異あり"]))
         
         st.divider()
+        st.subheader("🔍 結果の絞り込み ＆ 修正")
         
-        # フィルターとコピーエリア
+        # フィルター
         filter_options = ["✅ 済", "❌ 漏れ", "⚠️ 差異あり", "❓ 元データなし", "🏦 支払", "-"]
-        col_f1, col_f2 = st.columns([2, 1])
+        col_f1, col_f2 = st.columns([8, 2])
         with col_f1:
             sel_status = st.multiselect("表示フィルター", filter_options, default=filter_options)
+        with col_f2:
+            st.markdown(f"<div style='margin-top: 32px;'><b>表示中の件数: {len(df_base[df_base['明細突合'].isin(sel_status)])} 件</b></div>", unsafe_allow_html=True)
         
         df_filtered = df_base[df_base["明細突合"].isin(sel_status)].copy()
         st.session_state.filtered_master_indices = df_filtered.index.tolist()
         
         tx_ids = "\n".join([str(tid) for tid in df_filtered["取引No"] if str(tid) not in ["", "nan", "-"]])
         
-        # 💡 取引Noコピーボタンの設置（ご指定の場所）
-        with st.expander("📋 表示中の取引Noを一括コピー"):
-            if tx_ids:
-                st.code(tx_ids, language="text")
-            else:
-                st.write("コピーできる取引Noがありません。")
+        # 💡 注釈を消し、スマートな「取引Noを一括コピー」ボタンを設置
+        try:
+            with st.popover("📋 取引Noを一括コピー"):
+                if tx_ids:
+                    st.caption("右上のアイコンをクリックでコピー↓")
+                    st.code(tx_ids, language="text")
+                else:
+                    st.write("対象の取引Noがありません。")
+        except AttributeError:
+            # 古いバージョンの環境用フォールバック
+            col_copy, _ = st.columns([2, 8])
+            with col_copy:
+                with st.expander("📋 取引Noを一括コピー"):
+                    if tx_ids:
+                        st.code(tx_ids, language="text")
+                    else:
+                        st.write("対象なし")
 
-        # 表示用フォーマット
         def format_bal(val):
             if pd.isna(val) or val is None or val == "-": return "-"
             if isinstance(val, (int, float)) and not math.isnan(val):
@@ -278,7 +294,7 @@ if df_ledger_raw is not None and df_card_raw is not None:
         # メインテーブル
         edit_cols = ["取引No", "日付", "摘要", "借方金額", "貸方金額", "明細突合", "帳簿残高", "計算残高", "残高照合"]
         
-        edited_df_ui = st.data_editor(
+        st.data_editor(
             df_display[edit_cols].style.map(
                 lambda x: "background-color: #ffcccc; color: #900;" if x in ["❌ 漏れ", "❌ 不一致"] else "",
                 subset=["明細突合", "残高照合"]
@@ -302,17 +318,18 @@ if df_ledger_raw is not None and df_card_raw is not None:
             key="main_editor"
         )
         
-        # 💡 下部ボタンレイアウト
         st.markdown("<br>", unsafe_allow_html=True)
-        col_down, col_empty, col_upd = st.columns([1, 1, 1])
         
-        with col_down:
-            # 常にフィルター後の最新計算済みデータをダウンロード
+        # 💡 下部ボタンレイアウト
+        # [2: 左にダウンロード] [6: 中央の空白] [2: 右側の計算残高列の下に更新ボタン]
+        col_dl, col_space, col_upd = st.columns([2, 6, 2])
+        
+        with col_dl:
             csv_bytes = virtual_df[virtual_df["明細突合"].isin(sel_status)].to_csv(index=False).encode("utf-8-sig")
-            st.download_button("表示中の結果をダウンロード", io.BytesIO(csv_bytes), "突合結果.csv")
+            st.download_button("📥 表示中の結果をダウンロード", io.BytesIO(csv_bytes), "突合結果.csv")
             
         with col_upd:
-            if st.button("計算残高を更新", type="primary", use_container_width=True):
+            if st.button("🔄 計算残高を更新"): 
                 st.session_state.result_df = virtual_df
                 st.session_state.current_bal = virtual_curr_bal
                 st.rerun()
