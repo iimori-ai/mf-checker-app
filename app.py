@@ -9,7 +9,6 @@ if "auth" not in st.session_state:
 
 if not st.session_state.auth:
     st.title("🔐 認証が必要です")
-    # 合言葉：351835
     password = st.text_input("合言葉を入力してください", type="password")
     if st.button("ログイン"):
         if password == "351835": 
@@ -19,11 +18,10 @@ if not st.session_state.auth:
             st.error("合言葉が正しくありません")
     st.stop()
 
-# --- 🚀 2. メインUI (CSV専用 爆速版) ---
-st.title("会計ソフト × クレカ明細 ⚡ 爆速CSV突合ツール")
-st.info("AIを使わず、プログラムで直接データを照合するため一瞬で終わります。")
+# --- 🚀 2. メインUI ---
+st.title("会計ソフト主導 ⚡ 爆速CSV突合ツール")
+st.info("会計ソフトのCSVの順番を維持したまま、カード明細と照合し残高を計算します。")
 
-# CSV読み込み用のヘルパー関数
 def load_csv(file):
     if file is not None:
         for enc in ["utf-8-sig", "shift_jis", "cp932"]:
@@ -34,131 +32,117 @@ def load_csv(file):
                 continue
     return None
 
+def clean_amt(val):
+    try:
+        v_str = str(val).replace(',', '').replace('¥', '').replace(' ', '').replace('▲', '-')
+        if pd.isna(val) or v_str == '' or v_str == 'nan':
+            return 0
+        return int(float(v_str))
+    except:
+        return 0
+
+# --- 📁 ファイルアップロード ---
 st.subheader("📁 1. ファイルをアップロード")
 col1, col2 = st.columns(2)
 with col1:
-    csv_ledger_file = st.file_uploader("会計ソフト (MF・freee等)", type=["csv"], key="ledger")
+    csv_ledger_file = st.file_uploader("会計ソフトCSV (マネフォ・freee等)", type=["csv"], key="ledger")
 with col2:
-    csv_card_file = st.file_uploader("クレカ明細 (各カード会社のCSV)", type=["csv"], key="card")
+    csv_card_file = st.file_uploader("クレカ明細CSV (カード会社)", type=["csv"], key="card")
 
-df_ledger = load_csv(csv_ledger_file)
+df_ledger_raw = load_csv(csv_ledger_file)
 df_card_raw = load_csv(csv_card_file)
 
-if df_ledger is not None:
-    st.success("✅ 会計ソフトのデータを読み込みました")
-
-if df_card_raw is not None:
-    st.success("✅ クレカ明細のデータを読み込みました")
-    
+if df_ledger_raw is not None and df_card_raw is not None:
     st.markdown("---")
-    st.subheader("⚙️ 2. クレカ明細の列を設定")
-    st.write("カード会社によって列の名前が違うため、該当する列を選んでください。")
     
-    # プレビュー表示
-    with st.expander("👀 クレカ明細のデータプレビュー (最初の5件)"):
-        st.dataframe(df_card_raw.head())
+    # 3. 列の設定
+    st.subheader("⚙️ 2. 列のマッピング設定")
     
-    columns = df_card_raw.columns.tolist()
+    c_led, c_crd = st.columns(2)
     
-    # ユーザーに列を選ばせる
-    col_c1, col_c2, col_c3 = st.columns(3)
-    with col_c1:
-        date_col = st.selectbox("📅 日付の列", columns, index=0)
-    with col_c2:
-        desc_col = st.selectbox("📝 摘要(店名)の列", columns, index=min(1, len(columns)-1))
-    with col_c3:
-        amt_col = st.selectbox("💰 金額の列", columns, index=min(2, len(columns)-1))
+    with c_led:
+        st.write("**会計ソフト側**")
+        led_cols = df_ledger_raw.columns.tolist()
+        l_date = st.selectbox("📅 日付", led_cols, index=0)
+        l_desc = st.selectbox("📝 摘要", led_cols, index=min(1, len(led_cols)-1))
+        # マネフォやfreeeの「貸方(購入)」と「借方(支払)」を選択
+        l_credit = st.selectbox("💰 貸方金額 (利用額)", led_cols, index=min(2, len(led_cols)-1))
+        l_debit = st.selectbox("💸 借方金額 (引き落とし額)", led_cols, index=min(3, len(led_cols)-1))
+
+    with c_crd:
+        st.write("**カード明細側**")
+        crd_cols = df_card_raw.columns.tolist()
+        c_amt = st.selectbox("💰 金額の列", crd_cols, index=min(1, len(crd_cols)-1))
 
     st.markdown("---")
-    st.subheader("🗓️ 3. 期間と残高の設定")
-    
-    # 日付のデフォルト値を今年に
-    this_year = datetime.now().year
-    
-    col_s1, col_s2, col_s3 = st.columns(3)
-    with col_s1:
-        start_date = st.date_input("開始日", value=date(this_year, 1, 1))
-    with col_s2:
-        end_date = st.date_input("終了日", value=date(this_year, 12, 31))
-    with col_s3:
-        start_balance = st.number_input("期首残高（開始日の前日時点）", value=0)
+    st.subheader("🗓️ 3. 初期残高")
+    start_balance = st.number_input("開始時点の未払金残高 (期首残高)", value=0)
 
-    # 実行ボタン
-    if df_ledger is not None and st.button("🚀 突合スタート！ (1秒で終わります)"):
+    if st.button("🚀 突合 ＆ 残高計算スタート！"):
         try:
-            # 必要な列だけを抽出してリネーム
-            df_card = df_card_raw[[date_col, desc_col, amt_col]].copy()
-            df_card.columns = ["date", "description", "amount"]
+            # --- 処理開始 ---
+            # 会計ソフト側のデータ (順番を維持)
+            df_res = df_ledger_raw.copy()
             
-            # 日付の変換とフィルタリング
-            df_card["date"] = pd.to_datetime(df_card["date"], errors="coerce")
-            df_card = df_card.dropna(subset=["date"])
-            mask = (df_card["date"].dt.date >= start_date) & (df_card["date"].dt.date <= end_date)
-            df_card = df_card.loc[mask].sort_values("date").reset_index(drop=True)
+            # 数値変換
+            df_res["_credit"] = df_res[l_credit].apply(clean_amt)
+            df_res["_debit"] = df_res[l_debit].apply(clean_amt)
             
-            if df_card.empty:
-                st.warning("指定された期間のデータが見つかりませんでした。")
-            else:
-                # 金額のクレンジング (カンマ、￥、マイナス記号のブレを修正)
-                def clean_amount(val):
-                    try:
-                        v_str = str(val).replace(',', '').replace('¥', '').replace(' ', '').replace('▲', '-')
-                        # 空白やNaNの場合は0にする
-                        if pd.isna(val) or v_str == '' or v_str == 'nan':
-                            return 0
-                        return int(float(v_str))
-                    except:
-                        return 0
+            # カード明細側の金額をセット化 (突合用)
+            card_amounts = set(df_card_raw[c_amt].apply(lambda x: str(clean_amt(x))))
+            
+            # 残高計算と突合フラグ
+            current_bal = start_balance
+            balances = []
+            matches = []
+            
+            for _, row in df_res.iterrows():
+                # 残高推移: 前の残高 + 今回利用額(貸方) - 引き落とし額(借方)
+                current_bal = current_bal + row["_credit"] - row["_debit"]
+                balances.append(current_bal)
                 
-                df_card["amount_clean"] = df_card["amount"].apply(clean_amount)
-                
-                # ゼロ円の行（決済じゃない行など）は除外してもOK
-                df_card = df_card[df_card["amount_clean"] != 0].copy()
-                
-                # 残高計算
-                df_card["計算残高"] = start_balance - df_card["amount_clean"].cumsum()
-                
-                # 会計ソフト側の全データを文字列セットにして検索を超高速化
-                ledger_values = set(df_ledger.astype(str).values.flatten())
-                
-                # 突合ロジック
-                def check_matching(amt):
-                    return "✅ 済" if str(amt) in ledger_values else "❌ 漏れ"
-                
-                df_card["状況"] = df_card["amount_clean"].apply(check_matching)
-                
-                # 表示用に日付を整形
-                df_card["date"] = df_card["date"].dt.strftime("%m/%d")
-                
-                # 必要な列だけを綺麗に表示
-                df_result = df_card[["状況", "date", "description", "amount_clean", "計算残高"]].rename(
-                    columns={"date": "日付", "description": "摘要", "amount_clean": "金額"}
-                )
-                
-                st.success("✨ 突合が完了しました！")
-                st.divider()
-                
-                m1, m2, m3 = st.columns(3)
-                m1.metric("最終計算残高", f"{int(df_result['計算残高'].iloc[-1]):,} 円")
-                m2.metric("抽出件数", f"{len(df_result)} 件")
-                m3.metric("未連携(漏れ)の数", f"{len(df_result[df_result['状況'] == '❌ 漏れ'])} 件")
-                
-                st.dataframe(
-                    df_result.style.map(
-                        lambda x: "background-color: #ffcccc; color: #900;" if x == "❌ 漏れ" else "",
-                        subset=["状況"]
-                    ),
-                    use_container_width=True
-                )
-                
-                # CSVダウンロード機能
-                csv_bytes = df_result.to_csv(index=False).encode("utf-8-sig")
-                st.download_button(
-                    label="📥 結果をCSVでダウンロード",
-                    data=io.BytesIO(csv_bytes),
-                    file_name=f"突合結果_{start_date}_{end_date}.csv",
-                    mime="text/csv",
-                )
-                
+                # 突合: 利用額(貸方)がある行のみカード明細と照合
+                if row["_credit"] > 0:
+                    amt_str = str(row["_credit"])
+                    matches.append("✅ 済" if amt_str in card_amounts else "❌ 漏れ")
+                elif row["_debit"] > 0:
+                    matches.append("🏦 支払")
+                else:
+                    matches.append("-")
+            
+            df_res["突合状況"] = matches
+            df_res["計算残高"] = balances
+            
+            # 表示する列を絞る
+            final_cols = [l_date, l_desc, l_credit, l_debit, "突合状況", "計算残高"]
+            df_display = df_res[final_cols]
+            
+            st.success("✨ 完了しました。会計ソフトの順番通りに表示しています。")
+            
+            # メトリック表示
+            m1, m2, m3 = st.columns(3)
+            m1.metric("最終未払残高", f"{current_bal:,} 円")
+            m2.metric("総件数", f"{len(df_display)} 件")
+            m3.metric("未連携(❌)数", f"{len(df_res[df_res['突合状況'] == '❌ 漏れ'])} 件")
+            
+            # テーブル表示
+            st.dataframe(
+                df_display.style.map(
+                    lambda x: "background-color: #ffcccc; color: #900;" if x == "❌ 漏れ" else "",
+                    subset=["突合状況"]
+                ).map(
+                    lambda x: "background-color: #e1f5fe;" if x == "🏦 支払" else "",
+                    subset=["突合状況"]
+                ),
+                use_container_width=True
+            )
+            
+            # CSVダウンロード
+            csv_bytes = df_display.to_csv(index=False).encode("utf-8-sig")
+            st.download_button("📥 結果をダウンロード", io.BytesIO(csv_bytes), "突合結果.csv", "text/csv")
+            
         except Exception as e:
-            st.error(f"エラーが発生しました: {e}\n列の選択が間違っていないか確認してください。")
+            st.error(f"エラー: {e}")
+
+elif csv_ledger_file or csv_card_file:
+    st.warning("両方のCSVファイルをアップロードしてください。")
