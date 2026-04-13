@@ -1,5 +1,4 @@
 import streamlit as st
-import streamlit.components.v1 as components
 import pandas as pd
 import io
 from datetime import datetime, date
@@ -8,14 +7,6 @@ import unicodedata
 
 # 💡 画面全体を広く使う「ワイドモード」
 st.set_page_config(page_title="会計・クレカ突合ツール", layout="wide")
-
-# 💡 部分更新機能のセットアップ
-if hasattr(st, "fragment"):
-    fragment_decorator = st.fragment
-elif hasattr(st, "experimental_fragment"):
-    fragment_decorator = st.experimental_fragment
-else:
-    fragment_decorator = lambda f: f
 
 # --- 🔐 1. 認証ゲート ---
 if "auth" not in st.session_state:
@@ -34,7 +25,7 @@ if not st.session_state.auth:
 
 # --- 🚀 2. メインUI ---
 st.title("会計ソフト主導 ⚡ 爆速ファイル突合ツール (完全版)")
-st.info("【強制スクロール防止機能を搭載】画面がジャンプしなくなり、快適に連続編集できます！")
+st.info("【スクロール問題解決】表の高さを固定することで、編集しても画面が一番上にジャンプしないようにしました！")
 
 # --- 🛠️ 関数群 ---
 def load_file(file):
@@ -110,6 +101,7 @@ def recalculate_balances(df, start_bal):
     df["残高照合"] = new_checks
     return df, curr_bal
 
+# 💡 ステータスが変更された瞬間に裏で計算する機能
 def handle_edit():
     edits = st.session_state.main_editor.get("edited_rows", {})
     if not edits: return
@@ -241,35 +233,9 @@ if df_ledger_raw is not None and df_card_raw is not None:
             st.error(f"エラー: {e}")
 
     # ==========================================
-    # 💡 結果表示・編集エリア（強制スクロール防止）
+    # 結果表示・編集エリア
     # ==========================================
-    @fragment_decorator
-    def interactive_results():
-        
-        # 💡 ジャンプ防止魔法のスクリプト（再描画のたびに0.1秒間位置を固定する）
-        components.html(
-            """
-            <script>
-            const doc = window.parent.document;
-            const pos = sessionStorage.getItem('stScrollPos');
-            if (pos) {
-                let interval = setInterval(() => {
-                    doc.documentElement.scrollTop = parseInt(pos);
-                    doc.body.scrollTop = parseInt(pos);
-                }, 10);
-                setTimeout(() => clearInterval(interval), 150);
-            }
-            if (!window.parent.window.hasStScrollListener) {
-                doc.addEventListener('scroll', function() {
-                    sessionStorage.setItem('stScrollPos', doc.documentElement.scrollTop || doc.body.scrollTop);
-                }, {passive: true});
-                window.parent.window.hasStScrollListener = true;
-            }
-            </script>
-            """,
-            height=0
-        )
-
+    if getattr(st.session_state, 'result_df', None) is not None:
         df_master = st.session_state.result_df
         current_bal = st.session_state.current_bal
 
@@ -315,8 +281,11 @@ if df_ledger_raw is not None and df_card_raw is not None:
         df_filtered["帳簿残高"] = df_filtered["帳簿残高"].apply(format_bal)
         df_filtered["計算残高"] = df_filtered["計算残高"].apply(format_bal)
 
+        st.write("💡 **表の「明細突合」列をクリックして変更すると、画面が動くことなく瞬時に残高が再計算されます。**")
+        
         edit_cols = ["取引No", "日付", "摘要", "借方金額", "貸方金額", "明細突合", "帳簿残高", "計算残高", "残高照合"]
         
+        # 💡 【超重要】 height=800 を指定して表の高さをガッチリ固定し、レイアウト崩れによるジャンプを防ぐ！
         edited_df = st.data_editor(
             df_filtered[edit_cols].style.map(
                 lambda x: "background-color: #ffcccc; color: #900;" if x in ["❌ 漏れ", "❌ 不一致"] else "",
@@ -337,16 +306,13 @@ if df_ledger_raw is not None and df_card_raw is not None:
             disabled=["取引No", "日付", "摘要", "借方金額", "貸方金額", "帳簿残高", "計算残高", "残高照合"],
             use_container_width=True,
             hide_index=True,
+            height=800, # ← これがジャンプを防ぐ魔法の設定です
             key="main_editor",
-            on_change=handle_edit # ここで検知して瞬時に裏で計算
+            on_change=handle_edit
         )
 
         csv_bytes = edited_df.to_csv(index=False).encode("utf-8-sig")
         st.download_button("📥 表示中の結果をダウンロード", io.BytesIO(csv_bytes), "突合結果_絞り込み.csv")
-
-    # 実行判定
-    if getattr(st.session_state, 'result_df', None) is not None:
-        interactive_results()
 
 elif file_ledger or file_card:
     st.warning("両方のファイルをアップロードしてください。")
