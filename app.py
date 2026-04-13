@@ -24,7 +24,7 @@ if not st.session_state.auth:
 
 # --- 🚀 2. メインUI ---
 st.title("会計ソフト主導 ⚡ 爆速ファイル突合ツール (取引No照合版)")
-st.info("計算後にフィルターを操作してもデータが消えないように修正しました！")
+st.info("借方に入力されたキャンセルや調整分も、マイナス金額として正確に照合・計算します。")
 
 # --- 🛠️ 関数群 ---
 def load_file(file):
@@ -114,12 +114,13 @@ if df_ledger_raw is not None and df_card_raw is not None:
     with col_s3:
         start_balance = st.number_input("開始日の「前日」時点の残高", value=0)
 
-    # 💡 状態保存用（フィルターを触ってもデータが消えないようにする）
+    # 💡 状態保存用
     if "result_df" not in st.session_state:
         st.session_state.result_df = None
 
     if st.button("🚀 照合 ＆ 残高計算スタート！"):
         try:
+            # --- 会計側のデータ準備 ---
             df_res = df_ledger_raw.copy()
             df_res["_date_dt"] = pd.to_datetime(df_res[l_date], errors="coerce")
             mask_led = (df_res["_date_dt"].dt.date >= start_date) & (df_res["_date_dt"].dt.date <= end_date)
@@ -129,6 +130,7 @@ if df_ledger_raw is not None and df_card_raw is not None:
                 st.warning("指定された期間内に会計データがありません。")
                 st.stop()
                 
+            # --- カード側のデータ準備 (辞書化) ---
             df_card = df_card_raw.copy()
             df_card["_date_dt"] = pd.to_datetime(df_card[c_date], errors="coerce")
             mask_crd = (df_card["_date_dt"].dt.date >= start_date) & (df_card["_date_dt"].dt.date <= end_date)
@@ -147,6 +149,7 @@ if df_ledger_raw is not None and df_card_raw is not None:
             
             unified_rows = []
             
+            # --- 💡 会計帳簿のループ（借方の照合を修正） ---
             for i, row in df_res.iterrows():
                 credit_val = clean_amt(row[l_credit])
                 debit_val = clean_amt(row[l_debit])
@@ -157,22 +160,29 @@ if df_ledger_raw is not None and df_card_raw is not None:
                 actual_card_amt = 0
                 status = "-"
                 
-                if credit_val > 0:
-                    if tid and tid in card_dict:
-                        card_dict[tid]["matched"] = True
-                        actual_card_amt = card_dict[tid]["amt"]
-                        if credit_val == actual_card_amt:
-                            status = "✅ 済"
-                        else:
-                            status = "⚠️ 差異あり"
+                # 会計上の実質利用額（借方にある場合はマイナスの利用額とする）
+                ledger_net = credit_val - debit_val
+                
+                # 取引Noがカード明細に存在するか？（貸方・借方問わず）
+                if tid and tid in card_dict:
+                    card_dict[tid]["matched"] = True
+                    actual_card_amt = card_dict[tid]["amt"]
+                    
+                    # 帳簿の金額（プラスマイナス込み）と実際のカード金額を比較
+                    if ledger_net == actual_card_amt:
+                        status = "✅ 済"
                     else:
-                        status = "❓ 元データなし"
-                        actual_card_amt = 0 
-                elif debit_val > 0:
-                    status = "🏦 支払"
-                    actual_card_amt = 0
+                        status = "⚠️ 差異あり"
                 else:
-                    status = "-"
+                    # カード明細に取引Noがない場合
+                    if tid:
+                        status = "❓ 元データなし"
+                    elif debit_val > 0:
+                        status = "🏦 支払" # 取引Noのない借方は通常の「引き落とし」とみなす
+                    elif credit_val > 0:
+                        status = "❓ 元データなし"
+                    else:
+                        status = "-"
                     
                 unified_rows.append({
                     "_sort_date": date_dt,
@@ -181,15 +191,23 @@ if df_ledger_raw is not None and df_card_raw is not None:
                     "取引No": tid,
                     l_date: row[l_date],
                     l_desc: row[l_desc],
-                    l_debit: debit_val,
-                    l_credit: credit_val,
+                    l_debit: debit_val, # 会計帳簿の表示をそのまま維持
+                    l_credit: credit_val, # 会計帳簿の表示をそのまま維持
                     "明細突合": status,
                     "帳簿残高": orig_bal_val,
-                    "_actual_amt": actual_card_amt
+                    "_actual_amt": actual_card_amt,
+                    "_ledger_debit": debit_val
                 })
 
+            # --- 💡 漏れデータ（カードにあるが会計にない） ---
             for tid, data in card_dict.items():
                 if not data["matched"]:
+                    card_amt = data["amt"]
+                    
+                    # 漏れデータも帳簿風に（プラスなら貸方、マイナスなら借方へ）
+                    leak_debit = abs(card_amt) if card_amt < 0 else 0
+                    leak_credit = card_amt if card_amt > 0 else 0
+                    
                     unified_rows.append({
                         "_sort_date": pd.to_datetime(data["date"], errors="coerce"),
                         "_is_ledger": False,
@@ -197,11 +215,12 @@ if df_ledger_raw is not None and df_card_raw is not None:
                         "取引No": tid,
                         l_date: data["date"],
                         l_desc: data["desc"],
-                        l_debit: 0,
-                        l_credit: data["amt"],
+                        l_debit: leak_debit,
+                        l_credit: leak_credit,
                         "明細突合": "❌ 漏れ",
                         "帳簿残高": None,
-                        "_actual_amt": data["amt"]
+                        "_actual_amt": card_amt,
+                        "_ledger_debit": 0
                     })
             
             def get_sort_key(x):
@@ -210,10 +229,18 @@ if df_ledger_raw is not None and df_card_raw is not None:
                 
             unified_rows.sort(key=get_sort_key)
             
+            # --- 残高計算 ---
             current_bal = start_balance
             for r in unified_rows:
-                current_bal = current_bal + r["_actual_amt"] - r[l_debit]
+                if r["明細突合"] in ["✅ 済", "⚠️ 差異あり", "❌ 漏れ"]:
+                    # カードの実績値を加算（マイナスの場合は自動で減算される）
+                    current_bal += r["_actual_amt"]
+                elif r["明細突合"] == "🏦 支払":
+                    # 通常の銀行引き落としは借方の額を引く
+                    current_bal -= r["_ledger_debit"]
+                
                 r["計算残高"] = current_bal
+                
                 if r["_is_ledger"]:
                     r["残高照合"] = "✅ 一致" if r["帳簿残高"] == current_bal else "❌ 不一致"
                 else:
@@ -223,7 +250,6 @@ if df_ledger_raw is not None and df_card_raw is not None:
             final_cols = ["取引No", l_date, l_desc, l_debit, l_credit, "明細突合", "帳簿残高", "計算残高", "残高照合"]
             df_final = df_final[final_cols]
             
-            # 計算結果をセッションに保存（これで消えなくなる）
             st.session_state.result_df = df_final
             st.session_state.current_bal = current_bal
 
@@ -231,7 +257,7 @@ if df_ledger_raw is not None and df_card_raw is not None:
             st.error(f"エラーが発生しました: {e}")
 
     # ==========================================
-    # 💡 結果の表示エリア（ボタンの外に出しました）
+    # 結果の表示エリア
     # ==========================================
     if getattr(st.session_state, 'result_df', None) is not None:
         df_final = st.session_state.result_df
@@ -251,7 +277,6 @@ if df_ledger_raw is not None and df_card_raw is not None:
         
         st.divider()
         
-        # --- 🔍 フィルター＆一括コピー ---
         st.subheader("🔍 結果の絞り込み ＆ 取引No一括コピー")
         
         all_statuses = df_final["明細突合"].unique().tolist()
@@ -264,10 +289,8 @@ if df_ledger_raw is not None and df_card_raw is not None:
                 default=all_statuses
             )
         
-        # フィルター実行
         df_filtered = df_final[df_final["明細突合"].isin(selected_statuses)].copy()
         
-        # フィルターされた取引Noだけを抽出
         tx_ids = [str(tid) for tid in df_filtered["取引No"] if str(tid).strip() != "" and str(tid).strip() != "nan" and str(tid).strip() != "-"]
         tx_ids_str = "\n".join(tx_ids)
         
@@ -276,11 +299,10 @@ if df_ledger_raw is not None and df_card_raw is not None:
             with st.expander("📋 表示中の取引Noを一括コピー"):
                 if tx_ids_str:
                     st.caption("右上のアイコンをクリックでコピーできます↓")
-                    st.code(tx_ids_str, language="text") # これでコピーボタン付きで表示されます
+                    st.code(tx_ids_str, language="text")
                 else:
                     st.write("コピーできる取引Noがありません。")
 
-        # --- 📊 テーブル描画 ---
         def format_bal(val):
             if pd.isna(val) or val is None or val == "-": return "-"
             if isinstance(val, (int, float)) and not math.isnan(val):
