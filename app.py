@@ -20,7 +20,7 @@ if not st.session_state.auth:
 
 # --- 🚀 2. メインUI ---
 st.title("会計ソフト主導 ⚡ 爆速ファイル突合ツール")
-st.info("貸方の隣に突合状況を、残高の隣に計算結果との一致チェックを追加しました。")
+st.info("貸方の隣に突合状況を、帳簿残高の隣に計算結果との一致チェックを追加しました。")
 
 # --- 🛠️ 関数群 ---
 def load_file(file):
@@ -82,7 +82,7 @@ if df_ledger_raw is not None and df_card_raw is not None:
         l_desc = st.selectbox("📝 摘要列", led_cols, index=find_idx(led_cols, ["内容", "摘要", "取引内容"]))
         l_debit = st.selectbox("💸 借方金額 (支払額)", led_cols, index=find_idx(led_cols, ["借方金額", "出金", "支払"]))
         l_credit = st.selectbox("💰 貸方金額 (利用額)", led_cols, index=find_idx(led_cols, ["貸方金額", "入金", "利用"]))
-        l_orig_bal = st.selectbox("🏛️ 元の残高列", led_cols, index=find_idx(led_cols, ["残高"]))
+        l_orig_bal = st.selectbox("🏛️ 帳簿残高列", led_cols, index=find_idx(led_cols, ["残高"]))
 
     with c_crd:
         st.write("**カード明細側**")
@@ -136,7 +136,7 @@ if df_ledger_raw is not None and df_card_raw is not None:
                 else:
                     status_list.append("-")
                 
-                # 2. 残高照合（元の残高と計算残高が一致するか）
+                # 2. 残高照合（帳簿残高と計算残高が一致するか）
                 if row["_orig_bal_val"] == current_bal:
                     match_checks.append("✅ 一致")
                 else:
@@ -146,9 +146,12 @@ if df_ledger_raw is not None and df_card_raw is not None:
             df_res["計算残高"] = calc_balances
             df_res["残高照合"] = match_checks
             
-            # --- 🚀 レイアウト指定（ご要望の並び順） ---
-            # 日付 | 摘要 | 借方 | 貸方 | 明細突合 | 元の残高 | 計算残高 | 残高照合
-            final_cols = [l_date, l_desc, l_debit, l_credit, "明細突合", l_orig_bal, "計算残高", "残高照合"]
+            # 列名をわかりやすく「帳簿残高」にリネーム
+            df_res = df_res.rename(columns={l_orig_bal: "帳簿残高"})
+            
+            # --- 🚀 レイアウト指定 ---
+            # 日付 | 摘要 | 借方 | 貸方 | 明細突合 | 帳簿残高 | 計算残高 | 残高照合
+            final_cols = [l_date, l_desc, l_debit, l_credit, "明細突合", "帳簿残高", "計算残高", "残高照合"]
             df_final = df_res[final_cols].copy()
             
             st.success("✨ 解析完了")
@@ -158,7 +161,7 @@ if df_ledger_raw is not None and df_card_raw is not None:
             m2.metric("明細漏れ", f"{status_list.count('❌ 漏れ')} 件")
             m3.metric("残高不一致", f"{match_checks.count('❌ 不一致')} 件")
             
-            # テーブル
+            # テーブル描画
             st.dataframe(
                 df_final.style.map(
                     lambda x: "background-color: #ffcccc; color: #900;" if "❌" in str(x) else "",
@@ -166,7 +169,7 @@ if df_ledger_raw is not None and df_card_raw is not None:
                 ).map(
                     lambda x: "background-color: #e3f2fd;" if x == "🏦 支払" else "",
                     subset=["明細突合"]
-                ).format({"計算残高": "{:,}"}),
+                ).format({"帳簿残高": "{:,}", "計算残高": "{:,}"}),
                 use_container_width=True
             )
             
