@@ -3,6 +3,9 @@ import pandas as pd
 import io
 from datetime import datetime, date
 
+# 💡 ここで画面全体を広く使う「ワイドモード」に設定しています
+st.set_page_config(page_title="会計・クレカ突合ツール", layout="wide")
+
 # --- 🔐 1. 認証ゲート ---
 if "auth" not in st.session_state:
     st.session_state.auth = False
