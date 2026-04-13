@@ -23,8 +23,8 @@ if not st.session_state.auth:
     st.stop()
 
 # --- 🚀 2. メインUI ---
-st.title("会計ソフト主導 ⚡ 爆速ファイル突合ツール (取引No照合版)")
-st.info("【残高連動】ステータスを「済」に変更すると、即座に計算残高に反映されます。")
+st.title("会計ソフト主導 ⚡ 爆速ファイル突合ツール")
+st.info("【超快適アップデート】変更ボタンを廃止しました。ステータスを変更した瞬間にパッと残高が再計算されます！")
 
 # --- 🛠️ 関数群 ---
 def load_file(file):
@@ -81,16 +81,14 @@ def recalculate_balances(df, start_bal):
         
         amt_to_add = 0
         if status in ["✅ 済", "⚠️ 差異あり"]:
-            # カード実績があればそれを使う。手動で済にした場合などで実績がなければ帳簿の貸方を使う
+            # 実績があれば実績を、手動「済」などで実績がなければ帳簿の貸方を使う
             amt_to_add = actual_card_amt if actual_card_amt != 0 else credit
         elif status == "❌ 漏れ":
             amt_to_add = actual_card_amt
             
-        # 計算残高 = 前残高 + 今回利用(貸方) - 支払(借方)
         curr_bal = curr_bal + amt_to_add - debit
         new_bals.append(curr_bal)
         
-        # 帳簿データ（_is_ledgerがTrue）のみ残高照合を行う
         if r.get("_is_ledger", False):
             orig = clean_amt(r.get("帳簿残高", 0))
             new_checks.append("✅ 一致" if orig == curr_bal else "❌ 不一致")
@@ -100,6 +98,31 @@ def recalculate_balances(df, start_bal):
     df["計算残高"] = new_bals
     df["残高照合"] = new_checks
     return df, curr_bal
+
+# 💡 表が編集された瞬間に裏側で走る自動再計算処理
+def on_editor_change():
+    edits = st.session_state.main_editor.get("edited_rows", {})
+    if not edits: return
+    
+    df_master = st.session_state.result_df
+    master_indices = st.session_state.get("filtered_master_indices", [])
+    changed = False
+    
+    for pos_idx_str, col_edits in edits.items():
+        pos_idx = int(pos_idx_str)
+        if pos_idx < len(master_indices) and "明細突合" in col_edits:
+            master_idx = master_indices[pos_idx]
+            new_status = col_edits["明細突合"]
+            
+            if df_master.at[master_idx, "明細突合"] != new_status:
+                df_master.at[master_idx, "明細突合"] = new_status
+                changed = True
+                
+    if changed:
+        df_master, curr_bal = recalculate_balances(df_master, st.session_state.start_bal)
+        st.session_state.result_df = df_master
+        st.session_state.current_bal = curr_bal
+
 
 # --- 📁 1. ファイルアップロード ---
 st.subheader("📁 1. ファイルをアップロード")
@@ -115,7 +138,6 @@ df_card_raw = load_file(file_card)
 if df_ledger_raw is not None and df_card_raw is not None:
     st.markdown("---")
     
-    # 2. 列の設定
     st.subheader("⚙️ 2. 列のマッピング設定")
     led_cols = df_ledger_raw.columns.tolist()
     crd_cols = df_card_raw.columns.tolist()
@@ -132,6 +154,7 @@ if df_ledger_raw is not None and df_card_raw is not None:
 
     with c_crd:
         st.write("**カード明細側**")
+        st.caption("※「漏れ」データを発見した際に表示するため、日付や摘要も指定してください。")
         c_id = st.selectbox("🔑 取引No列 ", crd_cols, index=find_idx(crd_cols, ["取引No", "ID", "伝票番号", "番号"]))
         c_date = st.selectbox("📅 日付列 ", crd_cols, index=find_idx(crd_cols, ["日付", "年月日", "利用日"]))
         c_desc = st.selectbox("📝 摘要列 ", crd_cols, index=find_idx(crd_cols, ["内容", "摘要", "店名", "利用店"]))
@@ -148,7 +171,6 @@ if df_ledger_raw is not None and df_card_raw is not None:
     with col_s3:
         start_balance = st.number_input("開始日の「前日」時点の残高", value=0)
 
-    # 💡 状態保存用
     if "result_df" not in st.session_state:
         st.session_state.result_df = None
 
@@ -200,17 +222,20 @@ if df_ledger_raw is not None and df_card_raw is not None:
             
             df_master = pd.DataFrame(unified_rows).sort_values(["_sort_date", "_is_ledger", "_orig_idx"])
             df_master, last_bal = recalculate_balances(df_master, start_balance)
+            
             st.session_state.result_df = df_master
             st.session_state.start_bal = start_balance
+            st.session_state.current_bal = last_bal
 
         except Exception as e:
             st.error(f"エラー: {e}")
 
-    # --- 表示エリア ---
-    if st.session_state.result_df is not None:
+    # ==========================================
+    # 結果の表示 ＆ 手動編集エリア
+    # ==========================================
+    if getattr(st.session_state, 'result_df', None) is not None:
         df_master = st.session_state.result_df
         
-        # サマリー表示
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("最終計算残高", f"{int(df_master['計算残高'].iloc[-1]):,} 円")
         m2.metric("❌ 漏れ", len(df_master[df_master["明細突合"] == "❌ 漏れ"]))
@@ -219,50 +244,59 @@ if df_ledger_raw is not None and df_card_raw is not None:
         
         st.divider()
         
-        # フィルター設定
         all_status = df_master["明細突合"].unique().tolist()
-        sel_status = st.multiselect("表示フィルター", all_status, default=all_status)
+        sel_status = st.multiselect("表示フィルター（❌や⚠️だけに絞り込めます）", all_status, default=all_status)
         
-        # 💡 データエディターでの編集を受け取る
-        # 編集対象のデータ（内部列は隠す）
+        df_filtered = df_master[df_master["明細突合"].isin(sel_status)].copy()
+        
+        # 💡 表の行とマスターデータを紐づけるためにインデックスを保存
+        st.session_state.filtered_master_indices = df_filtered.index.tolist()
+        
+        # コピー機能
+        tx_ids = "\n".join([str(tid) for tid in df_filtered["取引No"] if str(tid) not in ["", "nan", "-"]])
+        with st.expander("📋 表示中の取引Noを一括コピー"):
+            st.code(tx_ids, language="text")
+
+        def format_bal(val):
+            if pd.isna(val) or val is None or val == "-": return "-"
+            if isinstance(val, (int, float)) and not math.isnan(val):
+                return f"{int(val):,}"
+            return val
+            
+        df_filtered["帳簿残高"] = df_filtered["帳簿残高"].apply(format_bal)
+        df_filtered["計算残高"] = df_filtered["計算残高"].apply(format_bal)
+
+        st.write("💡 **表の「明細突合」列をクリックして変更すると、瞬時に残高が再計算されます。**")
+        
+        # 編集する列だけを抽出
         edit_cols = ["取引No", "日付", "摘要", "借方金額", "貸方金額", "明細突合", "帳簿残高", "計算残高", "残高照合"]
         
-        st.write("💡 **「明細突合」を書き換えると残高が再計算されます。**")
-        
         edited_df = st.data_editor(
-            df_master[df_master["明細突合"].isin(sel_status)][edit_cols],
+            df_filtered[edit_cols].style.map(
+                lambda x: "background-color: #ffcccc; color: #900;" if x in ["❌ 漏れ", "❌ 不一致"] else "",
+                subset=["明細突合", "残高照合"]
+            ).map(
+                lambda x: "background-color: #fff3e0; color: #e65100;" if x == "⚠️ 差異あり" else "",
+                subset=["明細突合"]
+            ).map(
+                lambda x: "background-color: #f3e5f5; color: #6a1b9a;" if x == "❓ 元データなし" else "",
+                subset=["明細突合"]
+            ).map(
+                lambda x: "background-color: #e3f2fd;" if x == "🏦 支払" else "",
+                subset=["明細突合"]
+            ),
             column_config={
                 "明細突合": st.column_config.SelectboxColumn("明細突合", options=["✅ 済", "❌ 漏れ", "⚠️ 差異あり", "❓ 元データなし", "🏦 支払", "-"]),
-                "借方金額": st.column_config.NumberColumn(format="%d"),
-                "貸方金額": st.column_config.NumberColumn(format="%d"),
-                "帳簿残高": st.column_config.NumberColumn(format="%d"),
-                "計算残高": st.column_config.NumberColumn(format="%d"),
             },
             disabled=["取引No", "日付", "摘要", "借方金額", "貸方金額", "帳簿残高", "計算残高", "残高照合"],
             use_container_width=True,
             hide_index=True,
-            key="main_editor"
+            key="main_editor",
+            on_change=on_editor_change # 💡 ここで変更を瞬時に検知！
         )
 
-        # 💡 編集があった場合にマスターデータを更新して再計算
-        if not edited_df.equals(df_master[df_master["明細突合"].isin(sel_status)][edit_cols]):
-            # 変更された行を特定して反映
-            for idx, row in edited_df.iterrows():
-                master_idx = df_master[df_master["明細突合"].isin(sel_status)].index[idx]
-                df_master.at[master_idx, "明細突合"] = row["明細突合"]
-            
-            # 再計算
-            df_master, _ = recalculate_balances(df_master, st.session_state.start_bal)
-            st.session_state.result_df = df_master
-            st.rerun()
-
-        # 取引Noコピー
-        tx_ids = "\n".join([str(tid) for tid in edited_df["取引No"] if str(tid) not in ["", "nan", "-"]])
-        with st.expander("📋 表示中の取引Noを一括コピー"):
-            st.code(tx_ids, language="text")
-
         csv_bytes = edited_df.to_csv(index=False).encode("utf-8-sig")
-        st.download_button("📥 結果をダウンロード", io.BytesIO(csv_bytes), "突合結果.csv")
+        st.download_button("📥 表示中の結果をダウンロード", io.BytesIO(csv_bytes), "突合結果_絞り込み.csv")
 
 elif file_ledger or file_card:
     st.warning("両方のファイルをアップロードしてください。")
