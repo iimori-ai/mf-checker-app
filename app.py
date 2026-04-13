@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import io
 from datetime import datetime, date
@@ -8,7 +9,7 @@ import unicodedata
 # 💡 画面全体を広く使う「ワイドモード」
 st.set_page_config(page_title="会計・クレカ突合ツール", layout="wide")
 
-# 💡 画面ジャンプを防ぐ「部分更新」機能のセットアップ
+# 💡 部分更新機能のセットアップ
 if hasattr(st, "fragment"):
     fragment_decorator = st.fragment
 elif hasattr(st, "experimental_fragment"):
@@ -33,7 +34,7 @@ if not st.session_state.auth:
 
 # --- 🚀 2. メインUI ---
 st.title("会計ソフト主導 ⚡ 爆速ファイル突合ツール (完全版)")
-st.info("【二重計算バグ修正 ＆ 画面フリーズ機能追加】Excelのようにサクサク編集できます！")
+st.info("【強制スクロール防止機能を搭載】画面がジャンプしなくなり、快適に連続編集できます！")
 
 # --- 🛠️ 関数群 ---
 def load_file(file):
@@ -65,7 +66,6 @@ def clean_amt(val):
         return 0
 
 def clean_id(val):
-    """全角半角の揺れを吸収し、.0を削除して統一"""
     if pd.isna(val): return ""
     v_str = unicodedata.normalize('NFKC', str(val)).strip()
     if v_str.endswith('.0'): v_str = v_str[:-2]
@@ -77,7 +77,6 @@ def find_idx(cols, keywords):
             return i
     return 0
 
-# 💡 残高を一行ずつ正しく再計算する関数（二重引き算バグを修正）
 def recalculate_balances(df, start_bal):
     curr_bal = start_bal
     new_bals = []
@@ -89,7 +88,6 @@ def recalculate_balances(df, start_bal):
         credit = clean_amt(r.get("貸方金額", 0))
         actual_card_amt = clean_amt(r.get("_actual_amt", 0))
         
-        # 修正：カードの実際の金額(-3896など)を加算する場合は、帳簿のdebitを二重で引かない！
         if status in ["✅ 済", "⚠️ 差異あり"]:
             if actual_card_amt != 0:
                 curr_bal += actual_card_amt
@@ -112,7 +110,6 @@ def recalculate_balances(df, start_bal):
     df["残高照合"] = new_checks
     return df, curr_bal
 
-# 💡 表の編集を検知して裏で計算する機能
 def handle_edit():
     edits = st.session_state.main_editor.get("edited_rows", {})
     if not edits: return
@@ -166,6 +163,7 @@ if df_ledger_raw is not None and df_card_raw is not None:
 
     with c_crd:
         st.write("**カード明細側**")
+        st.caption("※「漏れ」データを発見した際に表示するため、日付や摘要も指定してください。")
         c_id = st.selectbox("🔑 取引No列 ", crd_cols, index=find_idx(crd_cols, ["取引No", "ID", "伝票番号", "番号"]))
         c_date = st.selectbox("📅 日付列 ", crd_cols, index=find_idx(crd_cols, ["日付", "年月日", "利用日"]))
         c_desc = st.selectbox("📝 摘要列 ", crd_cols, index=find_idx(crd_cols, ["内容", "摘要", "店名", "利用店"]))
@@ -243,10 +241,35 @@ if df_ledger_raw is not None and df_card_raw is not None:
             st.error(f"エラー: {e}")
 
     # ==========================================
-    # 💡 結果表示・編集エリア（Fragment適用により画面ジャンプを防止）
+    # 💡 結果表示・編集エリア（強制スクロール防止）
     # ==========================================
     @fragment_decorator
     def interactive_results():
+        
+        # 💡 ジャンプ防止魔法のスクリプト（再描画のたびに0.1秒間位置を固定する）
+        components.html(
+            """
+            <script>
+            const doc = window.parent.document;
+            const pos = sessionStorage.getItem('stScrollPos');
+            if (pos) {
+                let interval = setInterval(() => {
+                    doc.documentElement.scrollTop = parseInt(pos);
+                    doc.body.scrollTop = parseInt(pos);
+                }, 10);
+                setTimeout(() => clearInterval(interval), 150);
+            }
+            if (!window.parent.window.hasStScrollListener) {
+                doc.addEventListener('scroll', function() {
+                    sessionStorage.setItem('stScrollPos', doc.documentElement.scrollTop || doc.body.scrollTop);
+                }, {passive: true});
+                window.parent.window.hasStScrollListener = true;
+            }
+            </script>
+            """,
+            height=0
+        )
+
         df_master = st.session_state.result_df
         current_bal = st.session_state.current_bal
 
@@ -263,7 +286,6 @@ if df_ledger_raw is not None and df_card_raw is not None:
         m4.metric("⚠️ 差異あり", f"{diff_count} 件")
         
         st.divider()
-        
         st.subheader("🔍 結果の絞り込み ＆ 取引No一括コピー")
         
         all_status = df_master["明細突合"].unique().tolist()
@@ -272,8 +294,6 @@ if df_ledger_raw is not None and df_card_raw is not None:
             sel_status = st.multiselect("表示フィルター（❌や⚠️だけに絞り込めます）", all_status, default=all_status)
         
         df_filtered = df_master[df_master["明細突合"].isin(sel_status)].copy()
-        
-        # 編集とマスターデータを紐づけるためのインデックス保存
         st.session_state.filtered_master_indices = df_filtered.index.tolist()
         
         tx_ids = "\n".join([str(tid) for tid in df_filtered["取引No"] if str(tid) not in ["", "nan", "-"]])
@@ -295,8 +315,6 @@ if df_ledger_raw is not None and df_card_raw is not None:
         df_filtered["帳簿残高"] = df_filtered["帳簿残高"].apply(format_bal)
         df_filtered["計算残高"] = df_filtered["計算残高"].apply(format_bal)
 
-        st.write("💡 **表の「明細突合」列をクリックして変更すると、画面が動くことなく瞬時に残高が再計算されます。**")
-        
         edit_cols = ["取引No", "日付", "摘要", "借方金額", "貸方金額", "明細突合", "帳簿残高", "計算残高", "残高照合"]
         
         edited_df = st.data_editor(
@@ -320,7 +338,7 @@ if df_ledger_raw is not None and df_card_raw is not None:
             use_container_width=True,
             hide_index=True,
             key="main_editor",
-            on_change=handle_edit # 変更を検知して瞬時に裏で計算
+            on_change=handle_edit # ここで検知して瞬時に裏で計算
         )
 
         csv_bytes = edited_df.to_csv(index=False).encode("utf-8-sig")
