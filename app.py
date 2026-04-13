@@ -24,7 +24,7 @@ if not st.session_state.auth:
 
 # --- 🚀 2. メインUI ---
 st.title("会計ソフト主導 ⚡ 爆速ファイル突合ツール (取引No照合版)")
-st.info("取引Noをキーにして照合します。「漏れ」「元データなし」「差異あり」を厳密に判定します。")
+st.info("計算残高は帳簿の数字を使わず、クレカ明細の実際の金額のみを加減して純粋な残高を算出します。")
 
 # --- 🛠️ 関数群 ---
 def load_file(file):
@@ -55,7 +55,6 @@ def clean_amt(val):
         return 0
 
 def clean_id(val):
-    """取引Noのフォーマットを統一（.0の削除や空白除去）"""
     if pd.isna(val): return ""
     v_str = str(val).strip()
     if v_str.endswith('.0'): v_str = v_str[:-2]
@@ -134,7 +133,6 @@ if df_ledger_raw is not None and df_card_raw is not None:
             mask_crd = (df_card["_date_dt"].dt.date >= start_date) & (df_card["_date_dt"].dt.date <= end_date)
             df_card = df_card.loc[mask_crd].copy()
             
-            # 取引Noをキーにしたカード明細の辞書を作成
             card_dict = {}
             for _, r in df_card.iterrows():
                 tid = clean_id(r[c_id])
@@ -143,7 +141,7 @@ if df_ledger_raw is not None and df_card_raw is not None:
                         "date": r[c_date],
                         "desc": r[c_desc],
                         "amt": clean_amt(r[c_amt]),
-                        "matched": False # 突合チェック用フラグ
+                        "matched": False
                     }
             
             # --- メイン突合ループ ---
@@ -158,27 +156,32 @@ if df_ledger_raw is not None and df_card_raw is not None:
                 orig_bal_val = clean_amt(row[l_orig_bal])
                 tid = clean_id(row[l_id])
                 
-                # 1. 残高計算
-                current_bal = current_bal + credit_val - debit_val
-                calc_balances.append(current_bal)
+                # 実際のカード利用額（計算残高用）
+                actual_card_amt = 0 
                 
-                # 2. 取引Noベースの突合
-                if tid and credit_val > 0:
-                    if tid in card_dict:
-                        card_dict[tid]["matched"] = True # カード側のフラグを立てる
-                        if credit_val == card_dict[tid]["amt"]:
+                # 1. 取引Noベースの突合判定
+                if credit_val > 0:
+                    if tid and tid in card_dict:
+                        card_dict[tid]["matched"] = True
+                        actual_card_amt = card_dict[tid]["amt"] # 実際のカード明細の金額を取得
+                        
+                        if credit_val == actual_card_amt:
                             status_list.append("✅ 済")
                         else:
                             status_list.append("⚠️ 差異あり")
                     else:
                         status_list.append("❓ 元データなし")
+                        # 元データがない（カード決済されていない）なら、加算すべき額は0
+                        actual_card_amt = 0 
                 elif debit_val > 0:
                     status_list.append("🏦 支払")
-                elif credit_val > 0:
-                    # 取引Noが空欄の利用
-                    status_list.append("❓ 元データなし")
                 else:
                     status_list.append("-")
+                
+                # 💡 2. 残高計算（大原則：期首残高とクレカ明細の加減のみ）
+                # 帳簿の金額(credit_val)は一切無視し、純粋なカード明細の金額(actual_card_amt)を使います
+                current_bal = current_bal + actual_card_amt - debit_val
+                calc_balances.append(current_bal)
                 
                 # 3. 残高照合
                 if orig_bal_val == current_bal:
@@ -201,6 +204,8 @@ if df_ledger_raw is not None and df_card_raw is not None:
             missing_rows = []
             for tid, data in card_dict.items():
                 if not data["matched"]:
+                    # 漏れている明細も「真の残高」には含まれるため加算する
+                    current_bal += data["amt"] 
                     missing_rows.append({
                         "取引No": tid,
                         l_date: data["date"],
@@ -209,13 +214,11 @@ if df_ledger_raw is not None and df_card_raw is not None:
                         l_credit: data["amt"],
                         "明細突合": "❌ 漏れ",
                         "帳簿残高": "-",
-                        "計算残高": "-",
+                        "計算残高": current_bal,
                         "残高照合": "-"
                     })
             
-            # 漏れ行を表の末尾に追加
-            missing_count = len(missing_rows)
-            if missing_count > 0:
+            if len(missing_rows) > 0:
                 df_missing = pd.DataFrame(missing_rows)
                 df_final = pd.concat([df_final, df_missing], ignore_index=True)
             
@@ -224,11 +227,10 @@ if df_ledger_raw is not None and df_card_raw is not None:
             # サマリー
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("最終計算残高", f"{current_bal:,} 円")
-            m2.metric("❌ 漏れ (会計未登録)", f"{missing_count} 件")
+            m2.metric("❌ 漏れ (会計未登録)", f"{len(missing_rows)} 件")
             m3.metric("❓ 元データなし", f"{status_list.count('❓ 元データなし')} 件")
             m4.metric("⚠️ 差異あり", f"{status_list.count('⚠️ 差異あり')} 件")
             
-            # 残高をカンマ区切りの文字列にフォーマット（ "-" と混在してもエラーにならないように処理）
             def format_bal(val):
                 if isinstance(val, (int, float)) and not math.isnan(val):
                     return f"{int(val):,}"
