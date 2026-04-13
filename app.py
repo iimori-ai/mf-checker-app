@@ -143,10 +143,9 @@ if df_ledger_raw is not None and df_card_raw is not None:
                         "matched": False
                     }
             
-            # --- 💡 全データを時系列に並べるためのリスト作成 ---
+            # --- 全データを時系列に並べるためのリスト ---
             unified_rows = []
             
-            # 1. 会計ソフトのデータをリストに追加
             for i, row in df_res.iterrows():
                 credit_val = clean_amt(row[l_credit])
                 debit_val = clean_amt(row[l_debit])
@@ -188,13 +187,12 @@ if df_ledger_raw is not None and df_card_raw is not None:
                     "_actual_amt": actual_card_amt
                 })
 
-            # 2. 漏れデータ（カードにあるが会計にない）をリストに追加
             for tid, data in card_dict.items():
                 if not data["matched"]:
                     unified_rows.append({
                         "_sort_date": pd.to_datetime(data["date"], errors="coerce"),
                         "_is_ledger": False,
-                        "_orig_idx": 999999, # 会計データより後ろに並べるための措置
+                        "_orig_idx": 999999,
                         "取引No": tid,
                         l_date: data["date"],
                         l_desc: data["desc"],
@@ -205,34 +203,29 @@ if df_ledger_raw is not None and df_card_raw is not None:
                         "_actual_amt": data["amt"]
                     })
             
-            # 日付順（時系列）にソート
             def get_sort_key(x):
                 ts = x["_sort_date"].timestamp() if pd.notnull(x["_sort_date"]) else float('inf')
                 return (ts, 0 if x["_is_ledger"] else 1, x["_orig_idx"])
                 
             unified_rows.sort(key=get_sort_key)
             
-            # --- 🚀 残高の積み上げ計算 ---
+            # --- 残高計算 ---
             current_bal = start_balance
             for r in unified_rows:
-                # 期首残高 + 実際の利用額 - 支払額（引き落とし）
                 current_bal = current_bal + r["_actual_amt"] - r[l_debit]
                 r["計算残高"] = current_bal
-                
-                # 帳簿データであれば残高照合を行う
                 if r["_is_ledger"]:
                     r["残高照合"] = "✅ 一致" if r["帳簿残高"] == current_bal else "❌ 不一致"
                 else:
                     r["残高照合"] = "-"
                     
-            # データフレームに変換
             df_final = pd.DataFrame(unified_rows)
             final_cols = ["取引No", l_date, l_desc, l_debit, l_credit, "明細突合", "帳簿残高", "計算残高", "残高照合"]
             df_final = df_final[final_cols]
             
             st.success("✨ 照合完了。時系列に沿って計算残高を出力しました。")
             
-            # サマリー
+            # --- サマリー ---
             missing_count = len([r for r in unified_rows if r["明細突合"] == "❌ 漏れ"])
             not_found_count = len([r for r in unified_rows if r["明細突合"] == "❓ 元データなし"])
             diff_count = len([r for r in unified_rows if r["明細突合"] == "⚠️ 差異あり"])
@@ -243,19 +236,49 @@ if df_ledger_raw is not None and df_card_raw is not None:
             m3.metric("❓ 元データなし", f"{not_found_count} 件")
             m4.metric("⚠️ 差異あり", f"{diff_count} 件")
             
-            # 金額を見やすくフォーマット
+            st.divider()
+            
+            # --- 💡 フィルター＆コピー機能 ---
+            st.subheader("🔍 結果の絞り込み ＆ 取引No一括コピー")
+            
+            # ステータスの選択リストを作成
+            all_statuses = df_final["明細突合"].unique().tolist()
+            selected_statuses = st.multiselect(
+                "表示するステータスを選択してください（❌や⚠️だけに絞り込めます）",
+                all_statuses,
+                default=all_statuses # 最初はすべて選択された状態
+            )
+            
+            # フィルターを適用
+            df_filtered = df_final[df_final["明細突合"].isin(selected_statuses)].copy()
+            
+            # フィルターされたデータから取引Noを抽出 (空白を除外)
+            tx_ids = [str(tid) for tid in df_filtered["取引No"] if str(tid).strip() != "" and str(tid).strip() != "nan"]
+            tx_ids_str = "\n".join(tx_ids)
+            
+            col_f1, col_f2 = st.columns([3, 1])
+            with col_f1:
+                st.write(f"**表示件数: {len(df_filtered)} 件**")
+            with col_f2:
+                with st.expander("📋 表示中の取引Noを一括コピー"):
+                    if tx_ids_str:
+                        st.caption("右上のアイコンをクリックでコピーできます↓")
+                        st.code(tx_ids_str, language="text")
+                    else:
+                        st.write("コピーできる取引Noがありません。")
+
+            # --- テーブル描画 ---
             def format_bal(val):
                 if pd.isna(val) or val is None or val == "-": return "-"
                 if isinstance(val, (int, float)) and not math.isnan(val):
                     return f"{int(val):,}"
                 return val
                 
-            df_final["帳簿残高"] = df_final["帳簿残高"].apply(format_bal)
-            df_final["計算残高"] = df_final["計算残高"].apply(format_bal)
+            df_filtered["帳簿残高"] = df_filtered["帳簿残高"].apply(format_bal)
+            df_filtered["計算残高"] = df_filtered["計算残高"].apply(format_bal)
 
-            # テーブル描画
             st.dataframe(
-                df_final.style.map(
+                df_filtered.style.map(
                     lambda x: "background-color: #ffcccc; color: #900;" if x in ["❌ 漏れ", "❌ 不一致"] else "",
                     subset=["明細突合", "残高照合"]
                 ).map(
@@ -271,8 +294,9 @@ if df_ledger_raw is not None and df_card_raw is not None:
                 use_container_width=True
             )
             
-            csv_bytes = df_final.to_csv(index=False).encode("utf-8-sig")
-            st.download_button("📥 結果をダウンロード", io.BytesIO(csv_bytes), "突合結果.csv")
+            # ダウンロードもフィルター後のデータを対象にする
+            csv_bytes = df_filtered.to_csv(index=False).encode("utf-8-sig")
+            st.download_button("📥 表示中の結果をダウンロード", io.BytesIO(csv_bytes), "突合結果_絞り込み.csv")
             
         except Exception as e:
             st.error(f"エラーが発生しました: {e}")
