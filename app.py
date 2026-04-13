@@ -20,7 +20,7 @@ if not st.session_state.auth:
 
 # --- 🚀 2. メインUI ---
 st.title("会計ソフト主導 ⚡ 爆速ファイル突合ツール")
-st.info("期間指定を復活させました。CSVだけでなく、Excelファイル(.xlsx)の読み込みにも対応しています。")
+st.info("会計ソフトの帳簿順に表示し、借方（左）と貸方（右）の標準レイアウトに修正しました。")
 
 # 拡張子に合わせて読み込み方を変える関数
 def load_file(file):
@@ -28,7 +28,7 @@ def load_file(file):
         filename = file.name.lower()
         if filename.endswith(('.xlsx', '.xls')):
             try:
-                # Excelファイルの場合はpandasで読み込む (※openpyxlライブラリが必要です)
+                # Excelファイルの場合はpandasで読み込む
                 return pd.read_excel(file)
             except Exception as e:
                 st.error(f"Excelの読み込みエラー: {e}")
@@ -72,12 +72,14 @@ if df_ledger_raw is not None and df_card_raw is not None:
     c_led, c_crd = st.columns(2)
     
     with c_led:
-        st.write("**会計ソフト側**")
+        st.write("**会計ソフト側（未払金などの帳簿）**")
         led_cols = df_ledger_raw.columns.tolist()
         l_date = st.selectbox("📅 日付", led_cols, index=0)
         l_desc = st.selectbox("📝 摘要", led_cols, index=min(1, len(led_cols)-1))
-        l_credit = st.selectbox("💰 貸方金額 (利用額)", led_cols, index=min(2, len(led_cols)-1))
-        l_debit = st.selectbox("💸 借方金額 (引き落とし額)", led_cols, index=min(3, len(led_cols)-1))
+        
+        # 修正：簿記の基本である「借方が先（左）、貸方が後（右）」の順に修正
+        l_debit = st.selectbox("💸 借方金額 (引き落とし・支払額)", led_cols, index=min(2, len(led_cols)-1))
+        l_credit = st.selectbox("💰 貸方金額 (カード利用額・突合対象)", led_cols, index=min(3, len(led_cols)-1))
 
     with c_crd:
         st.write("**カード明細側**")
@@ -111,8 +113,8 @@ if df_ledger_raw is not None and df_card_raw is not None:
                 st.stop()
             
             # 数値変換
-            df_res["_credit"] = df_res[l_credit].apply(clean_amt)
             df_res["_debit"] = df_res[l_debit].apply(clean_amt)
+            df_res["_credit"] = df_res[l_credit].apply(clean_amt)
             
             # カード明細側の金額をセット化 (突合用)
             card_amounts = set(df_card_raw[c_amt].apply(lambda x: str(clean_amt(x))))
@@ -127,6 +129,7 @@ if df_ledger_raw is not None and df_card_raw is not None:
                 current_bal = current_bal + row["_credit"] - row["_debit"]
                 balances.append(current_bal)
                 
+                # 突合対象はカード利用額（貸方）
                 if row["_credit"] > 0:
                     amt_str = str(row["_credit"])
                     matches.append("✅ 済" if amt_str in card_amounts else "❌ 漏れ")
@@ -138,8 +141,8 @@ if df_ledger_raw is not None and df_card_raw is not None:
             df_res["突合状況"] = matches
             df_res["計算残高"] = balances
             
-            # 表示する列を絞る
-            final_cols = [l_date, l_desc, l_credit, l_debit, "突合状況", "計算残高"]
+            # 修正：表示する列も 借方(左) → 貸方(右) の順番に直しました
+            final_cols = [l_date, l_desc, l_debit, l_credit, "突合状況", "計算残高"]
             df_display = df_res[final_cols]
             
             st.success("✨ 完了しました。会計ソフトの順番通りに表示しています。")
@@ -149,6 +152,7 @@ if df_ledger_raw is not None and df_card_raw is not None:
             m2.metric("期間内の総件数", f"{len(df_display)} 件")
             m3.metric("未連携(❌)数", f"{len(df_res[df_res['突合状況'] == '❌ 漏れ'])} 件")
             
+            # データの表示
             st.dataframe(
                 df_display.style.map(
                     lambda x: "background-color: #ffcccc; color: #900;" if x == "❌ 漏れ" else "",
