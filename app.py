@@ -19,17 +19,27 @@ if not st.session_state.auth:
     st.stop()
 
 # --- 🚀 2. メインUI ---
-st.title("会計ソフト主導 ⚡ 爆速CSV突合ツール")
-st.info("会計ソフトのCSVの順番を維持したまま、カード明細と照合し残高を計算します。")
+st.title("会計ソフト主導 ⚡ 爆速ファイル突合ツール")
+st.info("期間指定を復活させました。CSVだけでなく、Excelファイル(.xlsx)の読み込みにも対応しています。")
 
-def load_csv(file):
+# 拡張子に合わせて読み込み方を変える関数
+def load_file(file):
     if file is not None:
-        for enc in ["utf-8-sig", "shift_jis", "cp932"]:
+        filename = file.name.lower()
+        if filename.endswith(('.xlsx', '.xls')):
             try:
-                file.seek(0)
-                return pd.read_csv(file, encoding=enc)
-            except:
-                continue
+                # Excelファイルの場合はpandasで読み込む (※openpyxlライブラリが必要です)
+                return pd.read_excel(file)
+            except Exception as e:
+                st.error(f"Excelの読み込みエラー: {e}")
+                return None
+        else:
+            for enc in ["utf-8-sig", "shift_jis", "cp932"]:
+                try:
+                    file.seek(0)
+                    return pd.read_csv(file, encoding=enc)
+                except:
+                    continue
     return None
 
 def clean_amt(val):
@@ -45,18 +55,19 @@ def clean_amt(val):
 st.subheader("📁 1. ファイルをアップロード")
 col1, col2 = st.columns(2)
 with col1:
-    csv_ledger_file = st.file_uploader("会計ソフトCSV (マネフォ・freee等)", type=["csv"], key="ledger")
+    file_ledger = st.file_uploader("会計ソフト (CSV / Excel)", type=["csv", "xlsx", "xls"], key="ledger")
 with col2:
-    csv_card_file = st.file_uploader("クレカ明細CSV (カード会社)", type=["csv"], key="card")
+    file_card = st.file_uploader("クレカ明細 (CSV / Excel)", type=["csv", "xlsx", "xls"], key="card")
 
-df_ledger_raw = load_csv(csv_ledger_file)
-df_card_raw = load_csv(csv_card_file)
+df_ledger_raw = load_file(file_ledger)
+df_card_raw = load_file(file_card)
 
 if df_ledger_raw is not None and df_card_raw is not None:
     st.markdown("---")
     
-    # 3. 列の設定
+    # 3. 列の設定 (ファイルのヘッダーから自動取得)
     st.subheader("⚙️ 2. 列のマッピング設定")
+    st.write("アップロードしたファイルのヘッダー（1行目）から該当する列を選んでください。")
     
     c_led, c_crd = st.columns(2)
     
@@ -65,7 +76,6 @@ if df_ledger_raw is not None and df_card_raw is not None:
         led_cols = df_ledger_raw.columns.tolist()
         l_date = st.selectbox("📅 日付", led_cols, index=0)
         l_desc = st.selectbox("📝 摘要", led_cols, index=min(1, len(led_cols)-1))
-        # マネフォやfreeeの「貸方(購入)」と「借方(支払)」を選択
         l_credit = st.selectbox("💰 貸方金額 (利用額)", led_cols, index=min(2, len(led_cols)-1))
         l_debit = st.selectbox("💸 借方金額 (引き落とし額)", led_cols, index=min(3, len(led_cols)-1))
 
@@ -75,14 +85,30 @@ if df_ledger_raw is not None and df_card_raw is not None:
         c_amt = st.selectbox("💰 金額の列", crd_cols, index=min(1, len(crd_cols)-1))
 
     st.markdown("---")
-    st.subheader("🗓️ 3. 初期残高")
-    start_balance = st.number_input("開始時点の未払金残高 (期首残高)", value=0)
+    st.subheader("🗓️ 3. 期間と初期残高の設定")
+    
+    this_year = datetime.now().year
+    col_s1, col_s2, col_s3 = st.columns(3)
+    with col_s1:
+        start_date = st.date_input("開始日", value=date(this_year, 1, 1))
+    with col_s2:
+        end_date = st.date_input("終了日", value=date(this_year, 12, 31))
+    with col_s3:
+        start_balance = st.number_input("開始日の前日時点の未払金残高", value=0)
 
     if st.button("🚀 突合 ＆ 残高計算スタート！"):
         try:
-            # --- 処理開始 ---
-            # 会計ソフト側のデータ (順番を維持)
             df_res = df_ledger_raw.copy()
+            
+            # --- 期間で絞り込み ---
+            # 会計ソフトの日付列を認識してフィルタをかける
+            df_res["_date_parsed"] = pd.to_datetime(df_res[l_date], errors="coerce")
+            mask = (df_res["_date_parsed"].dt.date >= start_date) & (df_res["_date_parsed"].dt.date <= end_date)
+            df_res = df_res.loc[mask].copy()
+            
+            if df_res.empty:
+                st.warning("指定された期間のデータが見つかりませんでした。日付の列や期間設定を確認してください。")
+                st.stop()
             
             # 数値変換
             df_res["_credit"] = df_res[l_credit].apply(clean_amt)
@@ -91,17 +117,16 @@ if df_ledger_raw is not None and df_card_raw is not None:
             # カード明細側の金額をセット化 (突合用)
             card_amounts = set(df_card_raw[c_amt].apply(lambda x: str(clean_amt(x))))
             
-            # 残高計算と突合フラグ
             current_bal = start_balance
             balances = []
             matches = []
             
+            # 会計ソフトの順番通りに処理
             for _, row in df_res.iterrows():
                 # 残高推移: 前の残高 + 今回利用額(貸方) - 引き落とし額(借方)
                 current_bal = current_bal + row["_credit"] - row["_debit"]
                 balances.append(current_bal)
                 
-                # 突合: 利用額(貸方)がある行のみカード明細と照合
                 if row["_credit"] > 0:
                     amt_str = str(row["_credit"])
                     matches.append("✅ 済" if amt_str in card_amounts else "❌ 漏れ")
@@ -119,13 +144,11 @@ if df_ledger_raw is not None and df_card_raw is not None:
             
             st.success("✨ 完了しました。会計ソフトの順番通りに表示しています。")
             
-            # メトリック表示
             m1, m2, m3 = st.columns(3)
             m1.metric("最終未払残高", f"{current_bal:,} 円")
-            m2.metric("総件数", f"{len(df_display)} 件")
+            m2.metric("期間内の総件数", f"{len(df_display)} 件")
             m3.metric("未連携(❌)数", f"{len(df_res[df_res['突合状況'] == '❌ 漏れ'])} 件")
             
-            # テーブル表示
             st.dataframe(
                 df_display.style.map(
                     lambda x: "background-color: #ffcccc; color: #900;" if x == "❌ 漏れ" else "",
@@ -137,12 +160,11 @@ if df_ledger_raw is not None and df_card_raw is not None:
                 use_container_width=True
             )
             
-            # CSVダウンロード
             csv_bytes = df_display.to_csv(index=False).encode("utf-8-sig")
-            st.download_button("📥 結果をダウンロード", io.BytesIO(csv_bytes), "突合結果.csv", "text/csv")
+            st.download_button("📥 結果をCSVでダウンロード", io.BytesIO(csv_bytes), "突合結果.csv", "text/csv")
             
         except Exception as e:
-            st.error(f"エラー: {e}")
+            st.error(f"エラーが発生しました: {e}\n日付や金額の列が正しく選択されているか確認してください。")
 
-elif csv_ledger_file or csv_card_file:
-    st.warning("両方のCSVファイルをアップロードしてください。")
+elif file_ledger or file_card:
+    st.warning("両方のファイルをアップロードしてください。")
