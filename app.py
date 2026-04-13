@@ -33,7 +33,7 @@ if not st.session_state.auth:
 
 # --- 🚀 2. メインUI ---
 st.title("会計ソフト主導 ⚡ 爆速ファイル突合ツール (完全版)")
-st.info("【スクロール問題・完全解決】フルリロードの原因を特定し排除しました。画面がピタッと止まります！")
+st.info("【スクロール問題・完全解決】表のデータ更新タイミングを分けることで、画面ジャンプを完全に封じ込めました！")
 
 # --- 🛠️ 関数群 ---
 def load_file(file):
@@ -76,6 +76,7 @@ def find_idx(cols, keywords):
             return i
     return 0
 
+# 計算ロジック（※2重計算のバグ修正済み）
 def recalculate_balances(df, start_bal):
     curr_bal = start_bal
     new_bals = []
@@ -108,30 +109,6 @@ def recalculate_balances(df, start_bal):
     df["計算残高"] = new_bals
     df["残高照合"] = new_checks
     return df, curr_bal
-
-# 💡 ステータスが変更された瞬間に裏で計算する機能
-def handle_edit():
-    edits = st.session_state.main_editor.get("edited_rows", {})
-    if not edits: return
-    
-    df_master = st.session_state.result_df
-    master_indices = st.session_state.get("filtered_master_indices", [])
-    changed = False
-    
-    for pos_idx_str, col_edits in edits.items():
-        pos_idx = int(pos_idx_str)
-        if pos_idx < len(master_indices) and "明細突合" in col_edits:
-            master_idx = master_indices[pos_idx]
-            new_status = col_edits["明細突合"]
-            
-            if df_master.at[master_idx, "明細突合"] != new_status:
-                df_master.at[master_idx, "明細突合"] = new_status
-                changed = True
-                
-    if changed:
-        df_master, curr_bal = recalculate_balances(df_master, st.session_state.start_bal)
-        st.session_state.result_df = df_master
-        st.session_state.current_bal = curr_bal
 
 # --- 📁 1. ファイルアップロード ---
 st.subheader("📁 1. ファイルをアップロード")
@@ -238,28 +215,43 @@ if df_ledger_raw is not None and df_card_raw is not None:
             st.session_state.start_bal = start_balance
             st.session_state.current_bal = last_bal
             
-            # 💡 これをTrueにすることで、下部の結果エリアが表示される
+            # 結果表示フラグをON
             st.session_state.is_calculated = True
 
         except Exception as e:
             st.error(f"エラー: {e}")
 
     # ==========================================
-    # 💡 結果表示・編集エリア（部分更新機能のみ適用）
+    # 💡 画面ジャンプを完全に防ぐ最新の表示エリア
     # ==========================================
     @fragment_decorator
     def interactive_results():
-        df_master = st.session_state.result_df
-        current_bal = st.session_state.current_bal
-
-        st.success("✨ 照合完了。時系列に沿って計算残高を出力しました。")
+        df_base = st.session_state.result_df
         
-        missing_count = len(df_master[df_master["明細突合"] == "❌ 漏れ"])
-        not_found_count = len(df_master[df_master["明細突合"] == "❓ 元データなし"])
-        diff_count = len(df_master[df_master["明細突合"] == "⚠️ 差異あり"])
+        # 1. ユーザーの編集状態を読み取り、一時的な「仮想データ」を作成する
+        virtual_df = df_base.copy()
+        edits = st.session_state.get("main_editor", {}).get("edited_rows", {})
+        master_indices = st.session_state.get("filtered_master_indices", [])
+        
+        if edits and master_indices:
+            for pos_idx_str, col_edits in edits.items():
+                pos_idx = int(pos_idx_str)
+                if pos_idx < len(master_indices) and "明細突合" in col_edits:
+                    master_idx = master_indices[pos_idx]
+                    virtual_df.at[master_idx, "明細突合"] = col_edits["明細突合"]
+                    
+        # 仮想データを使って裏で残高を再計算
+        virtual_df, virtual_curr_bal = recalculate_balances(virtual_df, st.session_state.start_bal)
+
+        # 2. 上部の数字は仮想データを使ってリアルタイムに表示！
+        st.success("✨ 照合完了。上部の数字は編集に合わせてリアルタイムに変動します。")
+        
+        missing_count = len(virtual_df[virtual_df["明細突合"] == "❌ 漏れ"])
+        not_found_count = len(virtual_df[virtual_df["明細突合"] == "❓ 元データなし"])
+        diff_count = len(virtual_df[virtual_df["明細突合"] == "⚠️ 差異あり"])
         
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("最終計算残高", f"{int(current_bal):,} 円")
+        m1.metric("最終計算残高", f"{int(virtual_curr_bal):,} 円")
         m2.metric("❌ 漏れ (会計未登録)", f"{missing_count} 件")
         m3.metric("❓ 元データなし", f"{not_found_count} 件")
         m4.metric("⚠️ 差異あり", f"{diff_count} 件")
@@ -267,12 +259,13 @@ if df_ledger_raw is not None and df_card_raw is not None:
         st.divider()
         st.subheader("🔍 結果の絞り込み ＆ 取引No一括コピー")
         
-        all_status = df_master["明細突合"].unique().tolist()
+        filter_options = ["✅ 済", "❌ 漏れ", "⚠️ 差異あり", "❓ 元データなし", "🏦 支払", "-"]
         col_f1, col_f2 = st.columns([2, 1])
         with col_f1:
-            sel_status = st.multiselect("表示フィルター（❌や⚠️だけに絞り込めます）", all_status, default=all_status)
+            sel_status = st.multiselect("表示フィルター（❌や⚠️だけに絞り込めます）", filter_options, default=filter_options)
         
-        df_filtered = df_master[df_master["明細突合"].isin(sel_status)].copy()
+        # 3. 表に渡すデータは「元のまま（中身を変えない）」にする！
+        df_filtered = df_base[df_base["明細突合"].isin(sel_status)].copy()
         st.session_state.filtered_master_indices = df_filtered.index.tolist()
         
         tx_ids = "\n".join([str(tid) for tid in df_filtered["取引No"] if str(tid) not in ["", "nan", "-"]])
@@ -291,15 +284,17 @@ if df_ledger_raw is not None and df_card_raw is not None:
                 return f"{int(val):,}"
             return val
             
-        df_filtered["帳簿残高"] = df_filtered["帳簿残高"].apply(format_bal)
-        df_filtered["計算残高"] = df_filtered["計算残高"].apply(format_bal)
+        df_display = df_filtered.copy()
+        df_display["帳簿残高"] = df_display["帳簿残高"].apply(format_bal)
+        df_display["計算残高"] = df_display["計算残高"].apply(format_bal)
 
-        st.write("💡 **表の「明細突合」列をクリックして変更すると、画面が動くことなく瞬時に残高が再計算されます。**")
+        st.write("💡 **表のステータスを変更すると、上の「最終計算残高」が瞬時に変わります。**")
+        st.caption("※表が上にスクロールするのを防ぐため、表内の「計算残高」は下の確定ボタンを押すまで変わりません。")
         
         edit_cols = ["取引No", "日付", "摘要", "借方金額", "貸方金額", "明細突合", "帳簿残高", "計算残高", "残高照合"]
         
-        edited_df = st.data_editor(
-            df_filtered[edit_cols].style.map(
+        st.data_editor(
+            df_display[edit_cols].style.map(
                 lambda x: "background-color: #ffcccc; color: #900;" if x in ["❌ 漏れ", "❌ 不一致"] else "",
                 subset=["明細突合", "残高照合"]
             ).map(
@@ -313,20 +308,27 @@ if df_ledger_raw is not None and df_card_raw is not None:
                 subset=["明細突合"]
             ),
             column_config={
-                "明細突合": st.column_config.SelectboxColumn("明細突合", options=["✅ 済", "❌ 漏れ", "⚠️ 差異あり", "❓ 元データなし", "🏦 支払", "-"]),
+                "明細突合": st.column_config.SelectboxColumn("明細突合", options=filter_options),
             },
             disabled=["取引No", "日付", "摘要", "借方金額", "貸方金額", "帳簿残高", "計算残高", "残高照合"],
             use_container_width=True,
             hide_index=True,
-            height=800, 
-            key="main_editor",
-            on_change=handle_edit
+            key="main_editor" # データを更新しないので、編集しても一切ジャンプしません
         )
+        
+        # 4. 最後にまとめて表の計算を確定させるボタン
+        c_btn1, c_btn2 = st.columns(2)
+        with c_btn1:
+            if st.button("💾 編集を確定して表の計算残高を更新 (※一番上に戻ります)", type="primary"):
+                st.session_state.result_df = virtual_df
+                st.session_state.current_bal = virtual_curr_bal
+                st.rerun()
+        with c_btn2:
+            # ダウンロードボタンには、最新の計算結果（virtual_df）をそのまま渡します！
+            csv_bytes = virtual_df[virtual_df["明細突合"].isin(sel_status)].to_csv(index=False).encode("utf-8-sig")
+            st.download_button("📥 表示中の結果をダウンロード", io.BytesIO(csv_bytes), "突合結果_絞り込み.csv")
 
-        csv_bytes = edited_df.to_csv(index=False).encode("utf-8-sig")
-        st.download_button("📥 表示中の結果をダウンロード", io.BytesIO(csv_bytes), "突合結果_絞り込み.csv")
-
-    # 💡 修正箇所：データの中身は見ずにフラグだけを確認して実行
+    # 実行判定
     if st.session_state.get("is_calculated", False):
         interactive_results()
 
