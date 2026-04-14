@@ -76,9 +76,14 @@ def find_idx(cols, keywords):
             return i
     return 0
 
+# 💡 本質的な会計ロジックに基づく再計算関数
 def recalculate_balances(df, start_bal):
-    curr_bal = start_bal
-    new_bals = []
+    curr_calc = start_bal
+    ledger_offset = 0  # 手動で「漏れ→済」にした金額を帳簿に加算していくための変数
+    last_adj_ledger = start_bal
+    
+    new_calc = []
+    new_ledger = []
     new_checks = []
     
     for _, r in df.iterrows():
@@ -86,31 +91,73 @@ def recalculate_balances(df, start_bal):
         debit = clean_amt(r.get("借方金額", 0))
         credit = clean_amt(r.get("貸方金額", 0))
         actual_card_amt = clean_amt(r.get("_actual_amt", 0))
+        is_ledger = r.get("_is_ledger", False)
+        orig_ledger_bal = r.get("_orig_ledger_bal")
         
+        # --- 1. 計算残高の更新 ---
+        calc_amt = 0
         if status in ["✅ 済", "⚠️ 差異あり"]:
-            if actual_card_amt != 0:
-                curr_bal += actual_card_amt
-            else:
-                curr_bal += (credit - debit)
+            calc_amt = actual_card_amt if actual_card_amt != 0 else (credit - debit)
         elif status == "❌ 漏れ":
-            curr_bal += actual_card_amt
+            calc_amt = actual_card_amt
         elif status == "💳 分割手数料":
-            # 💡 帳簿に手入力した分割手数料（未払金増加）を反映
-            curr_bal += (credit - debit)
+            calc_amt = credit - debit
         elif status == "🏦 支払":
-            curr_bal -= debit
+            calc_amt = -debit
             
-        new_bals.append(curr_bal)
+        curr_calc += calc_amt
+        new_calc.append(curr_calc)
         
-        if r.get("_is_ledger", False):
-            orig = clean_amt(r.get("帳簿残高", 0))
-            new_checks.append("✅ 一致" if orig == curr_bal else "❌ 不一致")
+        # --- 2. 帳簿残高の更新 ---
+        if is_ledger:
+            # もともと帳簿にある行は、基礎残高にオフセット（漏れ追記分）を加算する
+            adj_ledger = clean_amt(orig_ledger_bal) + ledger_offset
+            last_adj_ledger = adj_ledger
+        else:
+            if status == "✅ 済":
+                # 💡 漏れ → 済：帳簿に手入力したとみなして、帳簿残高をここで増やす！
+                ledger_offset += (credit - debit)
+                adj_ledger = last_adj_ledger + (credit - debit)
+                last_adj_ledger = adj_ledger
+            else:
+                # ただの漏れのままなら、帳簿には存在しないので残高はハイフン
+                adj_ledger = None
+                
+        new_ledger.append(adj_ledger)
+        
+        # --- 3. 残高照合 ---
+        if adj_ledger is not None:
+            new_checks.append("✅ 一致" if adj_ledger == curr_calc else "❌ 不一致")
         else:
             new_checks.append("-")
             
-    df["計算残高"] = new_bals
+    df["計算残高"] = new_calc
+    df["帳簿残高"] = new_ledger
     df["残高照合"] = new_checks
-    return df, curr_bal
+    return df, curr_calc
+
+def handle_edit():
+    edits = st.session_state.main_editor.get("edited_rows", {})
+    if not edits: return
+    
+    df_master = st.session_state.result_df
+    master_indices = st.session_state.get("filtered_master_indices", [])
+    changed = False
+    
+    for pos_idx_str, col_edits in edits.items():
+        pos_idx = int(pos_idx_str)
+        if pos_idx < len(master_indices) and "明細突合" in col_edits:
+            master_idx = master_indices[pos_idx]
+            new_status = col_edits["明細突合"]
+            
+            if df_master.at[master_idx, "明細突合"] != new_status:
+                df_master.at[master_idx, "明細突合"] = new_status
+                changed = True
+                
+    if changed:
+        df_master, curr_bal = recalculate_balances(df_master, st.session_state.start_bal)
+        st.session_state.result_df = df_master
+        st.session_state.current_bal = curr_bal
 
 # --- 📁 1. ファイルアップロード ---
 st.subheader("📁 1. ファイルをアップロード")
@@ -197,7 +244,10 @@ if df_ledger_raw is not None and df_card_raw is not None:
                 unified_rows.append({
                     "_sort_date": row["_date_dt"], "_is_ledger": True, "_orig_idx": i, "取引No": tid,
                     "日付": row[l_date], "摘要": row[l_desc], "借方金額": debit_val, "貸方金額": credit_val,
-                    "明細突合": status, "帳簿残高": clean_amt(row[l_orig_bal]), "_actual_amt": actual_card_amt
+                    "明細突合": status, 
+                    "帳簿残高": clean_amt(row[l_orig_bal]), 
+                    "_orig_ledger_bal": clean_amt(row[l_orig_bal]), # 元の数値を保持
+                    "_actual_amt": actual_card_amt
                 })
 
             for tid, data in card_dict.items():
@@ -206,7 +256,10 @@ if df_ledger_raw is not None and df_card_raw is not None:
                     unified_rows.append({
                         "_sort_date": pd.to_datetime(data["date"]), "_is_ledger": False, "_orig_idx": 999999, "取引No": tid,
                         "日付": data["date"], "摘要": data["desc"], "借方金額": abs(amt) if amt < 0 else 0, "貸方金額": amt if amt > 0 else 0,
-                        "明細突合": "❌ 漏れ", "帳簿残高": None, "_actual_amt": amt
+                        "明細突合": "❌ 漏れ", 
+                        "帳簿残高": None, 
+                        "_orig_ledger_bal": None, # 元の数値を保持
+                        "_actual_amt": amt
                     })
             
             df_master = pd.DataFrame(unified_rows).sort_values(["_sort_date", "_is_ledger", "_orig_idx"])
@@ -249,7 +302,6 @@ if df_ledger_raw is not None and df_card_raw is not None:
         st.divider()
         st.subheader("🔍 結果の絞り込み ＆ 修正")
         
-        # 💡 ステータスに「分割手数料」を追加
         filter_options = ["✅ 済", "❌ 漏れ", "⚠️ 差異あり", "❓ 元データなし", "💳 分割手数料", "🏦 支払", "-"]
         col_f1, col_f2 = st.columns([8, 2])
         with col_f1:
@@ -262,12 +314,21 @@ if df_ledger_raw is not None and df_card_raw is not None:
         
         tx_ids = "\n".join([str(tid) for tid in df_filtered["取引No"] if str(tid) not in ["", "nan", "-"]])
         
-        with st.popover("📋 取引Noを一括コピー"):
-            if tx_ids:
-                st.caption("右上のアイコンをクリックでコピー↓")
-                st.code(tx_ids, language="text")
-            else:
-                st.write("対象の取引Noがありません。")
+        try:
+            with st.popover("📋 取引Noを一括コピー"):
+                if tx_ids:
+                    st.caption("右上のアイコンをクリックでコピー↓")
+                    st.code(tx_ids, language="text")
+                else:
+                    st.write("対象の取引Noがありません。")
+        except AttributeError:
+            col_copy, _ = st.columns([2, 8])
+            with col_copy:
+                with st.expander("📋 取引Noを一括コピー"):
+                    if tx_ids:
+                        st.code(tx_ids, language="text")
+                    else:
+                        st.write("対象なし")
 
         def format_bal(val):
             if pd.isna(val) or val is None or val == "-": return "-"
@@ -305,7 +366,8 @@ if df_ledger_raw is not None and df_card_raw is not None:
             use_container_width=True,
             hide_index=True,
             height=600,
-            key="main_editor"
+            key="main_editor",
+            on_change=handle_edit
         )
         
         st.markdown("<br>", unsafe_allow_html=True)
