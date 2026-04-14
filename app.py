@@ -94,6 +94,9 @@ def recalculate_balances(df, start_bal):
                 curr_bal += (credit - debit)
         elif status == "❌ 漏れ":
             curr_bal += actual_card_amt
+        elif status == "💳 分割手数料":
+            # 💡 帳簿に手入力した分割手数料（未払金増加）を反映
+            curr_bal += (credit - debit)
         elif status == "🏦 支払":
             curr_bal -= debit
             
@@ -156,7 +159,6 @@ if df_ledger_raw is not None and df_card_raw is not None:
     with col_s3:
         start_balance = st.number_input("開始日の「前日」時点の残高", value=0)
 
-    # 初回実行フラグ
     if "is_calculated" not in st.session_state:
         st.session_state.is_calculated = False
 
@@ -213,7 +215,6 @@ if df_ledger_raw is not None and df_card_raw is not None:
             st.session_state.result_df = df_master
             st.session_state.start_bal = start_balance
             st.session_state.current_bal = last_bal
-            
             st.session_state.is_calculated = True
 
         except Exception as e:
@@ -226,7 +227,6 @@ if df_ledger_raw is not None and df_card_raw is not None:
     def interactive_results():
         df_base = st.session_state.result_df
         
-        # 仮想的な再計算処理（表示トップの数字用）
         virtual_df = df_base.copy()
         edits = st.session_state.get("main_editor", {}).get("edited_rows", {})
         master_indices = st.session_state.get("filtered_master_indices", [])
@@ -240,7 +240,6 @@ if df_ledger_raw is not None and df_card_raw is not None:
         
         virtual_df, virtual_curr_bal = recalculate_balances(virtual_df, st.session_state.start_bal)
 
-        # サマリー
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("最終計算残高", f"{int(virtual_curr_bal):,} 円")
         m2.metric("❌ 漏れ", len(virtual_df[virtual_df["明細突合"] == "❌ 漏れ"]))
@@ -250,8 +249,8 @@ if df_ledger_raw is not None and df_card_raw is not None:
         st.divider()
         st.subheader("🔍 結果の絞り込み ＆ 修正")
         
-        # フィルター
-        filter_options = ["✅ 済", "❌ 漏れ", "⚠️ 差異あり", "❓ 元データなし", "🏦 支払", "-"]
+        # 💡 ステータスに「分割手数料」を追加
+        filter_options = ["✅ 済", "❌ 漏れ", "⚠️ 差異あり", "❓ 元データなし", "💳 分割手数料", "🏦 支払", "-"]
         col_f1, col_f2 = st.columns([8, 2])
         with col_f1:
             sel_status = st.multiselect("表示フィルター", filter_options, default=filter_options)
@@ -263,23 +262,12 @@ if df_ledger_raw is not None and df_card_raw is not None:
         
         tx_ids = "\n".join([str(tid) for tid in df_filtered["取引No"] if str(tid) not in ["", "nan", "-"]])
         
-        # 💡 注釈を消し、スマートな「取引Noを一括コピー」ボタンを設置
-        try:
-            with st.popover("📋 取引Noを一括コピー"):
-                if tx_ids:
-                    st.caption("右上のアイコンをクリックでコピー↓")
-                    st.code(tx_ids, language="text")
-                else:
-                    st.write("対象の取引Noがありません。")
-        except AttributeError:
-            # 古いバージョンの環境用フォールバック
-            col_copy, _ = st.columns([2, 8])
-            with col_copy:
-                with st.expander("📋 取引Noを一括コピー"):
-                    if tx_ids:
-                        st.code(tx_ids, language="text")
-                    else:
-                        st.write("対象なし")
+        with st.popover("📋 取引Noを一括コピー"):
+            if tx_ids:
+                st.caption("右上のアイコンをクリックでコピー↓")
+                st.code(tx_ids, language="text")
+            else:
+                st.write("対象の取引Noがありません。")
 
         def format_bal(val):
             if pd.isna(val) or val is None or val == "-": return "-"
@@ -291,7 +279,6 @@ if df_ledger_raw is not None and df_card_raw is not None:
         df_display["帳簿残高"] = df_display["帳簿残高"].apply(format_bal)
         df_display["計算残高"] = df_display["計算残高"].apply(format_bal)
 
-        # メインテーブル
         edit_cols = ["取引No", "日付", "摘要", "借方金額", "貸方金額", "明細突合", "帳簿残高", "計算残高", "残高照合"]
         
         st.data_editor(
@@ -303,6 +290,9 @@ if df_ledger_raw is not None and df_card_raw is not None:
                 subset=["明細突合"]
             ).map(
                 lambda x: "background-color: #f3e5f5; color: #6a1b9a;" if x == "❓ 元データなし" else "",
+                subset=["明細突合"]
+            ).map(
+                lambda x: "background-color: #e8f5e9; color: #2e7d32;" if x == "💳 分割手数料" else "",
                 subset=["明細突合"]
             ).map(
                 lambda x: "background-color: #e3f2fd;" if x == "🏦 支払" else "",
@@ -320,8 +310,6 @@ if df_ledger_raw is not None and df_card_raw is not None:
         
         st.markdown("<br>", unsafe_allow_html=True)
         
-        # 💡 下部ボタンレイアウト
-        # [2: 左にダウンロード] [6: 中央の空白] [2: 右側の計算残高列の下に更新ボタン]
         col_dl, col_space, col_upd = st.columns([2, 6, 2])
         
         with col_dl:
@@ -329,7 +317,7 @@ if df_ledger_raw is not None and df_card_raw is not None:
             st.download_button("📥 表示中の結果をダウンロード", io.BytesIO(csv_bytes), "突合結果.csv")
             
         with col_upd:
-            if st.button("🔄 計算残高を更新"): 
+            if st.button("🔄 計算残高を更新", type="primary", use_container_width=True):
                 st.session_state.result_df = virtual_df
                 st.session_state.current_bal = virtual_curr_bal
                 st.rerun()
